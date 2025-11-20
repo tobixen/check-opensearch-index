@@ -258,7 +258,7 @@ Use `--filter` to monitor specific subsets of documents within an index:
 OK: Index 'logs-2024' has activity from 5m 23s ago | age=323s;3600;7200;0;
 
 # Multi-document check
-OK: 5 unique documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45s;60;300;0; unique_docs=5;;;;
+OK: 5 documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45s;60;300;0;
 ```
 **Exit code:** 0
 
@@ -268,7 +268,7 @@ OK: 5 unique documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45
 WARNING: No activity in 'filebeat-*' for 1h 15m (threshold: 1h 0m) | age=4500s;3600;7200;0;
 
 # Oldest document exceeds warning threshold
-WARNING: Oldest of 5 documents is 1m 25s old (threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0; unique_docs=5;;;;
+WARNING: Oldest of 5 documents is 1m 25s old (threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0;
 ```
 **Exit code:** 1
 
@@ -278,7 +278,7 @@ WARNING: Oldest of 5 documents is 1m 25s old (threshold: 1m 0s) | age=5s;60;300;
 CRITICAL: No activity in 'app-logs' for 3h 45m (threshold: 2h 0m) | age=13500s;3600;7200;0;
 
 # Oldest document exceeds critical threshold
-CRITICAL: Oldest of 10 documents is 6m 40s old (threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0; unique_docs=10;;;;
+CRITICAL: Oldest of 10 documents is 6m 40s old (threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0;
 ```
 **Exit code:** 2
 
@@ -286,7 +286,6 @@ CRITICAL: Oldest of 10 documents is 6m 40s old (threshold: 5m 0s) | age=12s;120;
 ```
 CRITICAL: No documents found in index 'nonexistent-index'
 CRITICAL: Only 3 documents found, need 5
-CRITICAL: Only 2 unique documents found, need 5
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
 CRITICAL: Connection error: Connection refused
 UNKNOWN: --count must be >= 1
@@ -363,13 +362,12 @@ Where:
 
 ### Multi-Document Mode (--count > 1)
 ```
-age=3s;60;300;0; oldest_age=45s;60;300;0; unique_docs=5;;;;
+age=3s;60;300;0; oldest_age=45s;60;300;0;
 ```
 
 Where:
 - `age=3s;60;300;0;` - Age of newest document with thresholds
 - `oldest_age=45s;60;300;0;` - Age of oldest document (this is checked against thresholds)
-- `unique_docs=5;;;;` - Count of unique documents found (informational, no thresholds)
 
 This can be graphed using PNP4Nagios, Grafana, or other monitoring tools.
 

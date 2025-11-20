@@ -360,15 +360,9 @@ def main():
 
     # Process documents
     now = datetime.now(timezone.utc)
-    doc_data = []  # List of (doc_id, timestamp, age_seconds)
-    unique_doc_ids = set()
+    doc_ages = []  # List of age in seconds for each document
 
     for doc in documents:
-        # Track unique document IDs
-        doc_id = doc.get('_id')
-        if doc_id:
-            unique_doc_ids.add(doc_id)
-
         # Extract timestamp
         timestamp_value = doc.get('_source', {}).get(args.timestamp_field)
 
@@ -384,28 +378,23 @@ def main():
             sys.exit(STATE_CRITICAL)
 
         age_seconds = int((now - doc_time).total_seconds())
-        doc_data.append((doc_id, doc_time, age_seconds))
+        doc_ages.append(age_seconds)
 
-    # Check if we have enough unique documents
-    if len(unique_doc_ids) < args.count:
-        print(f"CRITICAL: Only {len(unique_doc_ids)} unique documents found, need {args.count}")
-        sys.exit(STATE_CRITICAL)
-
-    # Get newest and oldest documents
-    newest_age = doc_data[0][2]  # First document (sorted DESC by timestamp)
-    oldest_age = doc_data[-1][2]  # Last document
+    # Get newest and oldest document ages
+    newest_age = doc_ages[0]  # First document (sorted DESC by timestamp in query)
+    oldest_age = doc_ages[-1]  # Last document
 
     if args.verbose:
-        print(f"DEBUG: Newest document: {doc_data[0][1]} (age: {newest_age}s)", file=sys.stderr)
-        print(f"DEBUG: Oldest document: {doc_data[-1][1]} (age: {oldest_age}s)", file=sys.stderr)
-        print(f"DEBUG: Found {len(unique_doc_ids)} unique documents", file=sys.stderr)
+        print(f"DEBUG: Newest document age: {newest_age}s", file=sys.stderr)
+        print(f"DEBUG: Oldest document age: {oldest_age}s", file=sys.stderr)
+        print(f"DEBUG: Processed {len(doc_ages)} documents", file=sys.stderr)
 
     # Check for excessive activity (minimum age thresholds) - CRITICAL takes precedence
     if args.min_critical is not None and oldest_age < args.min_critical:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
         print(f"CRITICAL: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
               f"(minimum threshold: {format_duration(args.min_critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
@@ -415,7 +404,7 @@ def main():
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
         print(f"CRITICAL: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
               f"(maximum threshold: {format_duration(args.critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
@@ -425,7 +414,7 @@ def main():
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
         print(f"WARNING: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
               f"(minimum threshold: {format_duration(args.min_warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
@@ -435,7 +424,7 @@ def main():
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
         print(f"WARNING: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
               f"(maximum threshold: {format_duration(args.warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
@@ -446,8 +435,8 @@ def main():
     perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
 
     if args.count > 1:
-        perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"OK: {args.count} unique documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perfdata}")
+        perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
+        print(f"OK: {args.count} documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perfdata}")
     else:
         print(f"OK: Index '{args.index}' has activity from {newest_formatted} ago | {perfdata}")
     sys.exit(STATE_OK)
