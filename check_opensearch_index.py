@@ -13,6 +13,7 @@ Exit codes:
 
 Author: Claude
 License: MIT
+Project home: https://github.com/tobixen/check-opensearch-index
 """
 
 import sys
