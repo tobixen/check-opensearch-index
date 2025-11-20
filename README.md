@@ -1,12 +1,13 @@
 # OpenSearch Index Activity Nagios Plugin
 
-Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checking the timestamp of the most recent document.
+Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checking the timestamp of the most recent documents.
 
 ## Features
 
 - ✅ Checks for recent activity in OpenSearch/Elasticsearch indices
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
 - ✅ Configurable warning and critical thresholds
+- ✅ Configurable number of recent documents to expect
 - ✅ Reads credentials from `~/.netrc` (secure)
 - ✅ Performance data output for graphing
 - ✅ Detailed error messages
