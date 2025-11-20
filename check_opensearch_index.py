@@ -93,7 +93,33 @@ Examples:
         help='Verbose output for debugging'
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        '--size',
+        type=int,
+        default=1,
+        help='Number of recent documents to fetch (default: 1)'
+    )
+
+    parser.add_argument(
+        '--min-unique',
+        type=int,
+        default=1,
+        help='Minimum number of unique documents required within interval (default: 1)'
+    )
+
+    parser.add_argument(
+        '--interval',
+        type=int,
+        help='Time interval in seconds to check for unique documents (default: warning threshold)'
+    )
+
+    args = parser.parse_args()
+
+    # Set default interval to warning threshold if not specified
+    if args.interval is None:
+        args.interval = args.warning
+
+    return args
 
 
 def get_credentials(host):
@@ -122,18 +148,21 @@ def get_credentials(host):
         sys.exit(STATE_UNKNOWN)
 
 
-def query_latest_document(host, index, timestamp_field, username, password, insecure=False, verbose=False):
+def query_latest_documents(host, index, timestamp_field, username, password, size=1, insecure=False, verbose=False):
     """
-    Query OpenSearch for the most recent document in the index.
+    Query OpenSearch for the most recent documents in the index.
+
+    Args:
+        size: Number of documents to retrieve (default: 1)
 
     Returns:
-        dict: Latest document with timestamp or None if no documents found
+        list: List of documents with timestamps, or empty list if no documents found
     """
     url = f"{host}/{index}/_search"
 
-    # Query to get the most recent document based on timestamp
+    # Query to get the most recent documents based on timestamp
     query = {
-        "size": 1,
+        "size": size,
         "sort": [
             {timestamp_field: {"order": "desc"}}
         ],
@@ -171,10 +200,7 @@ def query_latest_document(host, index, timestamp_field, username, password, inse
 
             hits = result.get('hits', {}).get('hits', [])
 
-            if not hits:
-                return None
-
-            return hits[0]
+            return hits
 
     except HTTPError as e:
         error_body = e.read().decode('utf-8', errors='ignore')
@@ -247,6 +273,19 @@ def main():
         print("UNKNOWN: Critical threshold must be >= warning threshold")
         sys.exit(STATE_UNKNOWN)
 
+    # Validate size and min_unique parameters
+    if args.size < 1:
+        print("UNKNOWN: --size must be >= 1")
+        sys.exit(STATE_UNKNOWN)
+
+    if args.min_unique < 1:
+        print("UNKNOWN: --min-unique must be >= 1")
+        sys.exit(STATE_UNKNOWN)
+
+    if args.min_unique > args.size:
+        print("UNKNOWN: --min-unique cannot be greater than --size")
+        sys.exit(STATE_UNKNOWN)
+
     # Get credentials
     username, password = get_credentials(args.host)
 
@@ -254,63 +293,112 @@ def main():
         cred_status = "found" if username else "not found"
         print(f"DEBUG: Credentials {cred_status} in ~/.netrc", file=sys.stderr)
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
+        if args.size > 1:
+            print(f"DEBUG: Fetching {args.size} documents, requiring {args.min_unique} unique within {args.interval}s", file=sys.stderr)
 
-    # Query for latest document
-    latest_doc = query_latest_document(
+    # Query for latest documents
+    documents = query_latest_documents(
         args.host,
         args.index,
         args.timestamp_field,
         username,
         password,
+        args.size,
         args.insecure,
         args.verbose
     )
 
     # Check if any documents found
-    if latest_doc is None:
+    if not documents:
         print(f"CRITICAL: No documents found in index '{args.index}'")
         sys.exit(STATE_CRITICAL)
 
-    # Extract timestamp
-    timestamp_value = latest_doc.get('_source', {}).get(args.timestamp_field)
-
-    if not timestamp_value:
-        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in document")
-        sys.exit(STATE_CRITICAL)
-
-    # Parse timestamp
-    latest_time = parse_timestamp(timestamp_value)
-
-    if latest_time is None:
-        print(f"CRITICAL: Unable to parse timestamp: {timestamp_value}")
-        sys.exit(STATE_CRITICAL)
-
-    # Calculate age
+    # Process documents
     now = datetime.now(timezone.utc)
+    doc_times = []
+    unique_doc_ids = set()
+
+    for doc in documents:
+        # Track unique document IDs
+        doc_id = doc.get('_id')
+        if doc_id:
+            unique_doc_ids.add(doc_id)
+
+        # Extract timestamp
+        timestamp_value = doc.get('_source', {}).get(args.timestamp_field)
+
+        if not timestamp_value:
+            print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in document")
+            sys.exit(STATE_CRITICAL)
+
+        # Parse timestamp
+        doc_time = parse_timestamp(timestamp_value)
+
+        if doc_time is None:
+            print(f"CRITICAL: Unable to parse timestamp: {timestamp_value}")
+            sys.exit(STATE_CRITICAL)
+
+        doc_times.append(doc_time)
+
+    # Get the most recent timestamp (first document)
+    latest_time = doc_times[0]
     age_seconds = int((now - latest_time).total_seconds())
 
     if args.verbose:
         print(f"DEBUG: Latest document timestamp: {latest_time}", file=sys.stderr)
         print(f"DEBUG: Current time: {now}", file=sys.stderr)
-        print(f"DEBUG: Age: {age_seconds} seconds", file=sys.stderr)
+        print(f"DEBUG: Age of latest: {age_seconds} seconds", file=sys.stderr)
+        print(f"DEBUG: Found {len(documents)} documents, {len(unique_doc_ids)} unique", file=sys.stderr)
 
-    # Format performance data for Nagios
-    perfdata = f"age={age_seconds}s;{args.warning};{args.critical};0;"
-
-    # Check against thresholds
-    age_formatted = format_duration(age_seconds)
-
+    # Check if latest document exceeds critical threshold
     if age_seconds >= args.critical:
+        age_formatted = format_duration(age_seconds)
+        perfdata = f"age={age_seconds}s;{args.warning};{args.critical};0;"
+        if args.size > 1:
+            perfdata += f" unique_docs={len(unique_doc_ids)};{args.min_unique};;0;{args.size}"
         print(f"CRITICAL: No activity in '{args.index}' for {age_formatted} "
               f"(threshold: {format_duration(args.critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
-    elif age_seconds >= args.warning:
+
+    # For multi-document checks, validate we have enough unique documents within interval
+    if args.size > 1:
+        # Count documents within the interval
+        interval_cutoff = now - timedelta(seconds=args.interval)
+        docs_within_interval = sum(1 for dt in doc_times if dt >= interval_cutoff)
+        unique_within_interval = len([dt for dt in doc_times if dt >= interval_cutoff])
+
+        if args.verbose:
+            print(f"DEBUG: {docs_within_interval} documents within last {args.interval}s", file=sys.stderr)
+            print(f"DEBUG: Interval cutoff: {interval_cutoff}", file=sys.stderr)
+
+        # Check if we have enough unique documents
+        if unique_within_interval < args.min_unique:
+            age_formatted = format_duration(age_seconds)
+            perfdata = f"age={age_seconds}s;{args.warning};{args.critical};0; unique_docs={unique_within_interval};{args.min_unique};;0;{args.size}"
+            print(f"WARNING: Only {unique_within_interval} unique documents in last {format_duration(args.interval)} "
+                  f"(threshold: {args.min_unique}) | {perfdata}")
+            sys.exit(STATE_WARNING)
+
+    # Check against warning threshold
+    if age_seconds >= args.warning:
+        age_formatted = format_duration(age_seconds)
+        perfdata = f"age={age_seconds}s;{args.warning};{args.critical};0;"
+        if args.size > 1:
+            perfdata += f" unique_docs={len(unique_doc_ids)};{args.min_unique};;0;{args.size}"
         print(f"WARNING: No activity in '{args.index}' for {age_formatted} "
               f"(threshold: {format_duration(args.warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
+
+    # All checks passed
+    age_formatted = format_duration(age_seconds)
+    perfdata = f"age={age_seconds}s;{args.warning};{args.critical};0;"
+    if args.size > 1:
+        perfdata += f" unique_docs={len(unique_doc_ids)};{args.min_unique};;0;{args.size}"
+        print(f"OK: Index '{args.index}' has activity from {age_formatted} ago "
+              f"({len(unique_doc_ids)} unique docs in last {format_duration(args.interval)}) | {perfdata}")
     else:
         print(f"OK: Index '{args.index}' has activity from {age_formatted} ago | {perfdata}")
-        sys.exit(STATE_OK)
+    sys.exit(STATE_OK)
 
 
 if __name__ == '__main__':
