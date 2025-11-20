@@ -37,15 +37,74 @@ The deprecated Bash script depends on `curl`, `jq` and GNU `date`.
 * The nrpe configuration should be fixed
 * The nagios/icinga/naemon configuration should be set up
 
-## Credentials Setup
+## Security Setup
 
-Add OpenSearch credentials to `~/.netrc`:
+### Create a Read-Only Monitoring User (Recommended)
+
+**Do not use the admin user for monitoring!** Create a dedicated read-only user with minimal permissions:
+
+```bash
+# Create a role with read-only access to indices
+curl -X PUT "https://localhost:9200/_plugins/_security/api/roles/monitoring_role" \
+  -u admin:admin -k -H 'Content-Type: application/json' -d '
+{
+  "cluster_permissions": [],
+  "index_permissions": [{
+    "index_patterns": ["*"],
+    "allowed_actions": ["indices:data/read/search"]
+  }]
+}'
+
+# Create a monitoring user
+curl -X PUT "https://localhost:9200/_plugins/_security/api/internalusers/monitoring" \
+  -u admin:admin -k -H 'Content-Type: application/json' -d '
+{
+  "password": "your-secure-password-here",
+  "backend_roles": [],
+  "attributes": {}
+}'
+
+# Map the user to the role
+curl -X PUT "https://localhost:9200/_plugins/_security/api/rolesmapping/monitoring_role" \
+  -u admin:admin -k -H 'Content-Type: application/json' -d '
+{
+  "backend_roles": [],
+  "hosts": [],
+  "users": ["monitoring"]
+}'
+```
+
+**For Elasticsearch (without OpenSearch Security Plugin):**
+
+```bash
+# Create role with read permission
+curl -X POST "https://localhost:9200/_security/role/monitoring_role" \
+  -u elastic:password -k -H 'Content-Type: application/json' -d '
+{
+  "indices": [{
+    "names": ["*"],
+    "privileges": ["read"]
+  }]
+}'
+
+# Create user
+curl -X POST "https://localhost:9200/_security/user/monitoring" \
+  -u elastic:password -k -H 'Content-Type: application/json' -d '
+{
+  "password": "your-secure-password-here",
+  "roles": ["monitoring_role"]
+}'
+```
+
+### Credentials Setup
+
+Add the monitoring user credentials to `~/.netrc`:
 
 ```bash
 cat >> ~/.netrc <<EOF
 machine localhost
-  login admin
-  password your-opensearch-password
+  login monitoring
+  password your-secure-password-here
 EOF
 
 chmod 600 ~/.netrc
@@ -55,10 +114,16 @@ For custom hosts:
 ```bash
 cat >> ~/.netrc <<EOF
 machine opensearch.example.com
-  login monitoring_user
-  password secret123
+  login monitoring
+  password your-secure-password-here
 EOF
 ```
+
+**Security notes:**
+- The monitoring user only needs `indices:data/read/search` permission (read-only)
+- Never use admin credentials for monitoring
+- Ensure `.netrc` has `600` permissions (readable only by owner)
+- Consider restricting the monitoring role to specific indices if needed
 
 ## Usage
 
