@@ -81,7 +81,7 @@ EOF
 ```
 usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
                                   [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
-                                  [--min-unique N]
+                                  [--count N]
 
 Required:
   -i, --index INDEX           OpenSearch index name or pattern
@@ -101,7 +101,7 @@ Optional:
   -v, --verbose               Verbose output for debugging
 
 Advanced (anti-flapping for indices with multiple sources):
-  --min-unique N              Require N unique documents, oldest must be within thresholds (default: 1)
+  --count N                   Number of recent documents to check (default: 1)
 
 Filtering:
   --filter JSON               JSON filter query to apply to document search
@@ -122,27 +122,27 @@ Filtering:
 
 ### Indices with Multiple Sources (Anti-Flapping)
 
-For indices with multiple sources at varying frequencies, use `--min-unique` to avoid false positives:
+For indices with multiple sources at varying frequencies, use `--count` to avoid false positives:
 
 ```bash
-# Require 5 unique documents, oldest must be within thresholds
+# Check 5 recent documents, oldest must be within thresholds
 # This prevents flapping when one infrequent source stops while others continue
-./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --min-unique 5
+./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --count 5
 
-# High-frequency index: need 10 recent unique documents
-./check_opensearch_index.py -i realtime-* -w 30 -c 120 --min-unique 10
+# High-frequency index: check 10 recent documents
+./check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 10
 
 # Conservative check for critical index
-./check_opensearch_index.py -i critical-app-* -w 120 -c 600 --min-unique 20
+./check_opensearch_index.py -i critical-app-* -w 120 -c 600 --count 20
 ```
 
 **How it works:**
-- Fetches N most recent documents in a single query (where N = --min-unique)
+- Fetches N most recent documents in a single query (where N = --count)
 - Verifies we got N unique documents (fails if index has < N total docs)
 - Checks that the **oldest** of those N documents is within warning/critical thresholds
 - Single query = fast execution, suitable for NRPE
 
-**Example:** With `--min-unique 5 -w 60 -c 300`:
+**Example:** With `--count 5 -w 60 -c 300`:
 - Fetches 5 most recent documents
 - If the 5th-oldest is only 45 seconds old → OK (all 5 are recent)
 - If the 5th-oldest is 90 seconds old → WARNING (not enough recent activity from all sources)
@@ -182,23 +182,23 @@ Monitor for TOO MUCH activity (infinite loops, excessive logging, attacks, disk 
 ```bash
 # Error logs should be rare - alert if too frequent
 # Warn if oldest of 10 docs is < 5 minutes old, critical if < 1 minute
-./check_opensearch_index.py -i error-logs-* --min-unique 10 \
+./check_opensearch_index.py -i error-logs-* --count 10 \
   --min-warning 300 --min-critical 60 -w 86400 -c 172800
 
 # Debug logging should be disabled in production
 # Alert if ANY debug logs appear (oldest of 5 docs < 1 hour old)
 ./check_opensearch_index.py -i app-logs -w 3600 -c 7200 \
   --filter '{"term": {"level.keyword": "DEBUG"}}' \
-  --min-unique 5 --min-warning 3600
+  --count 5 --min-warning 3600
 
 # Detect DoS/attack patterns - too many 4xx/5xx errors
-./check_opensearch_index.py -i nginx-access-* --min-unique 100 \
+./check_opensearch_index.py -i nginx-access-* --count 100 \
   --filter '{"range": {"status": {"gte": 400}}}' \
   --min-warning 60 --min-critical 10 -w 3600 -c 7200
 
 # Application should only log once per minute normally
 # Alert if logging faster than every 10 seconds
-./check_opensearch_index.py -i app-audit-* --min-unique 10 \
+./check_opensearch_index.py -i app-audit-* --count 10 \
   --min-warning 10 -w 3600 -c 7200
 ```
 
@@ -207,7 +207,7 @@ Monitor for TOO MUCH activity (infinite loops, excessive logging, attacks, disk 
 - `-w` / `-c` still check if oldest document is TOO OLD (insufficient activity)
 - Both can be used together to create an acceptable range
 
-**Example:** With `--min-unique 10 --min-warning 300 -w 3600`:
+**Example:** With `--count 10 --min-warning 300 -w 3600`:
 - Fetches 10 most recent documents
 - CRITICAL: if oldest is > 3600s (no activity)
 - WARNING: if oldest is < 300s (too much activity)
@@ -289,7 +289,7 @@ CRITICAL: Only 3 documents found, need 5
 CRITICAL: Only 2 unique documents found, need 5
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
 CRITICAL: Connection error: Connection refused
-UNKNOWN: --min-unique must be >= 1
+UNKNOWN: --count must be >= 1
 ```
 **Exit code:** 2 (CRITICAL) or 3 (UNKNOWN)
 
@@ -309,8 +309,8 @@ command[check_opensearch_filebeat]=/usr/lib/nagios/plugins/check_opensearch_inde
 # Check metrics with very short thresholds
 command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index.py -i metrics-* -w 120 -c 300
 
-# High-frequency index with anti-flapping (require 5 unique docs, oldest within 30s)
-command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --min-unique 5
+# High-frequency index with anti-flapping (check 5 docs, oldest within 30s)
+command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 5
 ```
 
 ### Nagios Service Definition
@@ -361,7 +361,7 @@ Where:
 - `7200` - Critical threshold
 - `0` - Minimum value (always 0)
 
-### Multi-Document Mode (--min-unique > 1)
+### Multi-Document Mode (--count > 1)
 ```
 age=3s;60;300;0; oldest_age=45s;60;300;0; unique_docs=5;;;;
 ```

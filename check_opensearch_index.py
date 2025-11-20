@@ -111,10 +111,10 @@ Examples:
     )
 
     parser.add_argument(
-        '--min-unique',
+        '--count',
         type=int,
         default=1,
-        help='Minimum number of unique documents required (default: 1). '
+        help='Number of recent documents to check (default: 1). '
              'Fetches this many recent documents and checks that the oldest is within thresholds.'
     )
 
@@ -309,9 +309,9 @@ def main():
         print("UNKNOWN: --min-critical must be < --critical (can't require both too old AND too new)")
         sys.exit(STATE_UNKNOWN)
 
-    # Validate min_unique parameter
-    if args.min_unique < 1:
-        print("UNKNOWN: --min-unique must be >= 1")
+    # Validate count parameter
+    if args.count < 1:
+        print("UNKNOWN: --count must be >= 1")
         sys.exit(STATE_UNKNOWN)
 
     # Parse filter JSON if provided
@@ -330,19 +330,19 @@ def main():
         cred_status = "found" if username else "not found"
         print(f"DEBUG: Credentials {cred_status} in ~/.netrc", file=sys.stderr)
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
-        if args.min_unique > 1:
-            print(f"DEBUG: Fetching {args.min_unique} documents, all must be within thresholds", file=sys.stderr)
+        if args.count > 1:
+            print(f"DEBUG: Fetching {args.count} documents, all must be within thresholds", file=sys.stderr)
         if filter_query:
             print(f"DEBUG: Applying filter: {json.dumps(filter_query)}", file=sys.stderr)
 
-    # Query for latest documents (fetch exactly min_unique documents)
+    # Query for latest documents (fetch exactly count documents)
     documents = query_latest_documents(
         args.host,
         args.index,
         args.timestamp_field,
         username,
         password,
-        args.min_unique,
+        args.count,
         filter_query,
         args.insecure,
         args.verbose
@@ -354,8 +354,8 @@ def main():
         sys.exit(STATE_CRITICAL)
 
     # Check if we got enough documents
-    if len(documents) < args.min_unique:
-        print(f"CRITICAL: Only {len(documents)} documents found, need {args.min_unique}")
+    if len(documents) < args.count:
+        print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
         sys.exit(STATE_CRITICAL)
 
     # Process documents
@@ -387,8 +387,8 @@ def main():
         doc_data.append((doc_id, doc_time, age_seconds))
 
     # Check if we have enough unique documents
-    if len(unique_doc_ids) < args.min_unique:
-        print(f"CRITICAL: Only {len(unique_doc_ids)} unique documents found, need {args.min_unique}")
+    if len(unique_doc_ids) < args.count:
+        print(f"CRITICAL: Only {len(unique_doc_ids)} unique documents found, need {args.count}")
         sys.exit(STATE_CRITICAL)
 
     # Get newest and oldest documents
@@ -404,9 +404,9 @@ def main():
     if args.min_critical is not None and oldest_age < args.min_critical:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.min_unique > 1:
+        if args.count > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"CRITICAL: Excessive activity - oldest of {args.min_unique} documents is only {age_formatted} old "
+        print(f"CRITICAL: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
               f"(minimum threshold: {format_duration(args.min_critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
 
@@ -414,9 +414,9 @@ def main():
     if oldest_age >= args.critical:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.min_unique > 1:
+        if args.count > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"CRITICAL: Insufficient activity - oldest of {args.min_unique} documents is {age_formatted} old "
+        print(f"CRITICAL: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
               f"(maximum threshold: {format_duration(args.critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
 
@@ -424,9 +424,9 @@ def main():
     if args.min_warning is not None and oldest_age < args.min_warning:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.min_unique > 1:
+        if args.count > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"WARNING: Excessive activity - oldest of {args.min_unique} documents is only {age_formatted} old "
+        print(f"WARNING: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
               f"(minimum threshold: {format_duration(args.min_warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
 
@@ -434,9 +434,9 @@ def main():
     if oldest_age >= args.warning:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.min_unique > 1:
+        if args.count > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"WARNING: Insufficient activity - oldest of {args.min_unique} documents is {age_formatted} old "
+        print(f"WARNING: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
               f"(maximum threshold: {format_duration(args.warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
 
@@ -445,9 +445,9 @@ def main():
     oldest_formatted = format_duration(oldest_age)
     perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
 
-    if args.min_unique > 1:
+    if args.count > 1:
         perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"OK: {args.min_unique} unique documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perfdata}")
+        print(f"OK: {args.count} unique documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perfdata}")
     else:
         print(f"OK: Index '{args.index}' has activity from {newest_formatted} ago | {perfdata}")
     sys.exit(STATE_OK)
