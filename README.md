@@ -15,6 +15,10 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 
 There exists a Bash version of the script as well, but it's already deprecated, contains less feautures and will not be maintained.
 
+## Disclaimer
+
+The script logic was entirely AI-generated - though, human-curated.  While I haven't looked through all of the code, I've done some inspections and come up with some suggestions for improvements.  This README is mostly written by AI, but polished and modified by me.
+
 ## Alternatives
 
 There is a more generic script at https://github.com/misiupajor/check_elasticsearch - but it's also more complex and comes with more dependencies.
