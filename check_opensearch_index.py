@@ -11,9 +11,10 @@ Exit codes:
   2 - CRITICAL: No activity within critical threshold or error
   3 - UNKNOWN: Invalid arguments or unexpected error
 
-Author: Claude
+Author: Claude / Tobias Brox
 License: MIT
 Project home: https://github.com/tobixen/check-opensearch-index
+Version: v0.2.0 (Will someone remember to keep this one up-to-date?)
 """
 
 import sys
