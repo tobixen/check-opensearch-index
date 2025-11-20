@@ -125,6 +125,30 @@ EOF
 - Ensure `.netrc` has `600` permissions (readable only by owner)
 - Consider restricting the monitoring role to specific indices if needed
 
+**For NRPE/system users with non-standard home directories:**
+
+If running as the `nagios` or `nrpe` user (which may have `/` or `/var/run/nrpe` as home), use a custom netrc location:
+
+```bash
+# Create netrc file in a dedicated location
+sudo mkdir -p /etc/nagios/credentials
+sudo cat > /etc/nagios/credentials/opensearch.netrc <<EOF
+machine localhost
+  login monitoring
+  password your-secure-password-here
+EOF
+
+# Set proper permissions
+sudo chmod 600 /etc/nagios/credentials/opensearch.netrc
+sudo chown nagios:nagios /etc/nagios/credentials/opensearch.netrc
+```
+
+Then use `--netrc` parameter:
+```bash
+./check_opensearch_index.py -i logs-* -w 300 -c 600 \
+  --netrc /etc/nagios/credentials/opensearch.netrc
+```
+
 ## Usage
 
 ### Basic Usage
@@ -170,6 +194,9 @@ Advanced (anti-flapping for indices with multiple sources):
 
 Filtering:
   --filter JSON               JSON filter query to apply to document search
+
+Credentials:
+  --netrc FILE                Path to .netrc file (default: ~/.netrc)
 ```
 
 
@@ -364,18 +391,20 @@ UNKNOWN: --count must be >= 1
 Add to `/etc/nagios/nrpe.cfg`:
 
 ```ini
-# Check logs index
-command[check_opensearch_logs]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* -w 3600 -c 7200
+# Check logs index (using custom netrc location)
+command[check_opensearch_logs]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* -w 3600 -c 7200 --netrc /etc/nagios/credentials/opensearch.netrc
 
 # Check filebeat with shorter thresholds
-command[check_opensearch_filebeat]=/usr/lib/nagios/plugins/check_opensearch_index.py -i filebeat-* -w 300 -c 600
+command[check_opensearch_filebeat]=/usr/lib/nagios/plugins/check_opensearch_index.py -i filebeat-* -w 300 -c 600 --netrc /etc/nagios/credentials/opensearch.netrc
 
 # Check metrics with very short thresholds
-command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index.py -i metrics-* -w 120 -c 300
+command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index.py -i metrics-* -w 120 -c 300 --netrc /etc/nagios/credentials/opensearch.netrc
 
 # High-frequency index with anti-flapping (check 5 docs, oldest within 30s)
-command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 5
+command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 5 --netrc /etc/nagios/credentials/opensearch.netrc
 ```
+
+**Note:** The `--netrc` parameter is essential when running as the `nagios`/`nrpe` user, as these system users typically don't have a proper home directory.
 
 ### Nagios Service Definition
 

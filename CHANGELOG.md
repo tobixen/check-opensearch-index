@@ -8,7 +8,23 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 ## Disclaimer
 
-Changelog for 0.2.0 was AI-generated, the rest of this file was written by a human.
+Changelog for 0.2.0 and 0.3.0 was AI-generated, the rest of this file was written by a human.
+
+## [0.3.0] - [2025-11-20]
+
+### Added
+
+- New `--netrc` parameter to specify custom .netrc file location
+  - Solves issues with NRPE/system users that have non-standard home directories
+  - Example: `--netrc /etc/nagios/credentials/opensearch.netrc`
+  - Default behavior unchanged (still uses `~/.netrc` if not specified)
+
+### Changed
+
+- Enhanced documentation for NRPE deployments
+  - Added complete guide for setting up credentials with system users
+  - Updated all NRPE examples to show `--netrc` usage
+  - Included proper file permissions and ownership instructions
 
 ## [0.2.0] - [2025-11-20]
 

@@ -126,12 +126,22 @@ Examples:
              'Will be wrapped in a bool filter. Multiple filters can be combined in a JSON array.'
     )
 
+    parser.add_argument(
+        '--netrc',
+        type=str,
+        help='Path to .netrc file for credentials (default: ~/.netrc)'
+    )
+
     return parser.parse_args()
 
 
-def get_credentials(host):
+def get_credentials(host, netrc_file=None):
     """
-    Get credentials from ~/.netrc for the given host.
+    Get credentials from .netrc file for the given host.
+
+    Args:
+        host: The host URL to get credentials for
+        netrc_file: Optional path to .netrc file (default: ~/.netrc)
 
     Returns:
         tuple: (username, password) or (None, None) if not found
@@ -141,7 +151,7 @@ def get_credentials(host):
         from urllib.parse import urlparse
         hostname = urlparse(host).hostname or 'localhost'
 
-        nrc = netrc.netrc()
+        nrc = netrc.netrc(netrc_file)
         auth = nrc.authenticators(hostname)
 
         if auth:
@@ -151,7 +161,7 @@ def get_credentials(host):
     except FileNotFoundError:
         return None, None
     except netrc.NetrcParseError as e:
-        print(f"UNKNOWN: Error parsing .netrc: {e}")
+        print(f"UNKNOWN: Error parsing .netrc file: {e}")
         sys.exit(STATE_UNKNOWN)
 
 
@@ -325,11 +335,12 @@ def main():
             sys.exit(STATE_UNKNOWN)
 
     # Get credentials
-    username, password = get_credentials(args.host)
+    username, password = get_credentials(args.host, args.netrc)
 
     if args.verbose:
         cred_status = "found" if username else "not found"
-        print(f"DEBUG: Credentials {cred_status} in ~/.netrc", file=sys.stderr)
+        netrc_location = args.netrc if args.netrc else "~/.netrc"
+        print(f"DEBUG: Credentials {cred_status} in {netrc_location}", file=sys.stderr)
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
         if args.count > 1:
             print(f"DEBUG: Fetching {args.count} documents, all must be within thresholds", file=sys.stderr)
