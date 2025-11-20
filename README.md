@@ -491,4 +491,4 @@ For issues or questions:
 
 ## Author
 
-The code was 100% AI-generated, by Claude - but with a Tobias Brox reviewing the results and ensuring good prompts.
+The code was 100% AI-generated, by Claude - but with Tobias Brox doing some reviewing and ensuring good prompts.
