@@ -31,7 +31,7 @@ The deprecated Bash script depends on `curl`, `jq` and GNU `date`.
 
 ## Installation
 
-* Script should be copied to the nrpe plugin directory, typically /usr/lib/nagios/plugins/
+* Script should be copied to the nrpe plugin directory, typically `/usr/lib/nagios/plugins/`
 * The nrpe configuration should be fixed
 * The nagios/icinga/naemon configuration should be set up
 
