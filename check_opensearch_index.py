@@ -59,14 +59,30 @@ Examples:
         '-w', '--warning',
         type=int,
         default=3600,
-        help='Warning threshold in seconds (default: 3600 = 1 hour)'
+        help='Maximum age warning threshold in seconds (default: 3600 = 1 hour). '
+             'Alert if documents are OLDER than this.'
     )
 
     parser.add_argument(
         '-c', '--critical',
         type=int,
         default=7200,
-        help='Critical threshold in seconds (default: 7200 = 2 hours)'
+        help='Maximum age critical threshold in seconds (default: 7200 = 2 hours). '
+             'Alert if documents are OLDER than this.'
+    )
+
+    parser.add_argument(
+        '--min-warning',
+        type=int,
+        help='Minimum age warning threshold in seconds. '
+             'Alert if documents are NEWER than this (excessive activity).'
+    )
+
+    parser.add_argument(
+        '--min-critical',
+        type=int,
+        help='Minimum age critical threshold in seconds. '
+             'Alert if documents are NEWER than this (excessive activity).'
     )
 
     parser.add_argument(
@@ -272,9 +288,24 @@ def main():
     """Main plugin execution."""
     args = parse_args()
 
-    # Validate thresholds
+    # Validate maximum age thresholds
     if args.critical < args.warning:
-        print("UNKNOWN: Critical threshold must be >= warning threshold")
+        print("UNKNOWN: --critical must be >= --warning")
+        sys.exit(STATE_UNKNOWN)
+
+    # Validate minimum age thresholds (if provided)
+    if args.min_warning is not None and args.min_critical is not None:
+        if args.min_critical > args.min_warning:
+            print("UNKNOWN: --min-critical must be <= --min-warning")
+            sys.exit(STATE_UNKNOWN)
+
+    # Check for conflicting thresholds
+    if args.min_warning is not None and args.min_warning >= args.warning:
+        print("UNKNOWN: --min-warning must be < --warning (can't require both too old AND too new)")
+        sys.exit(STATE_UNKNOWN)
+
+    if args.min_critical is not None and args.min_critical >= args.critical:
+        print("UNKNOWN: --min-critical must be < --critical (can't require both too old AND too new)")
         sys.exit(STATE_UNKNOWN)
 
     # Validate min_unique parameter
@@ -368,24 +399,44 @@ def main():
         print(f"DEBUG: Oldest document: {doc_data[-1][1]} (age: {oldest_age}s)", file=sys.stderr)
         print(f"DEBUG: Found {len(unique_doc_ids)} unique documents", file=sys.stderr)
 
-    # Check if oldest document exceeds critical threshold
+    # Check for excessive activity (minimum age thresholds) - CRITICAL takes precedence
+    if args.min_critical is not None and oldest_age < args.min_critical:
+        age_formatted = format_duration(oldest_age)
+        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
+        if args.min_unique > 1:
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+        print(f"CRITICAL: Excessive activity - oldest of {args.min_unique} documents is only {age_formatted} old "
+              f"(minimum threshold: {format_duration(args.min_critical)}) | {perfdata}")
+        sys.exit(STATE_CRITICAL)
+
+    # Check for too little activity (maximum age thresholds) - CRITICAL
     if oldest_age >= args.critical:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.min_unique > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"CRITICAL: Oldest of {args.min_unique} documents is {age_formatted} old "
-              f"(threshold: {format_duration(args.critical)}) | {perfdata}")
+        print(f"CRITICAL: Insufficient activity - oldest of {args.min_unique} documents is {age_formatted} old "
+              f"(maximum threshold: {format_duration(args.critical)}) | {perfdata}")
         sys.exit(STATE_CRITICAL)
 
-    # Check if oldest document exceeds warning threshold
+    # Check for excessive activity (minimum age thresholds) - WARNING
+    if args.min_warning is not None and oldest_age < args.min_warning:
+        age_formatted = format_duration(oldest_age)
+        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
+        if args.min_unique > 1:
+            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
+        print(f"WARNING: Excessive activity - oldest of {args.min_unique} documents is only {age_formatted} old "
+              f"(minimum threshold: {format_duration(args.min_warning)}) | {perfdata}")
+        sys.exit(STATE_WARNING)
+
+    # Check for too little activity (maximum age thresholds) - WARNING
     if oldest_age >= args.warning:
         age_formatted = format_duration(oldest_age)
         perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
         if args.min_unique > 1:
             perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0; unique_docs={len(unique_doc_ids)};;;;"
-        print(f"WARNING: Oldest of {args.min_unique} documents is {age_formatted} old "
-              f"(threshold: {format_duration(args.warning)}) | {perfdata}")
+        print(f"WARNING: Insufficient activity - oldest of {args.min_unique} documents is {age_formatted} old "
+              f"(maximum threshold: {format_duration(args.warning)}) | {perfdata}")
         sys.exit(STATE_WARNING)
 
     # All checks passed

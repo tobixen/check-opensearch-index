@@ -85,8 +85,14 @@ Required:
   -i, --index INDEX           OpenSearch index name or pattern
 
 Optional:
-  -w, --warning SECONDS       Warning threshold in seconds (default: 3600)
-  -c, --critical SECONDS      Critical threshold in seconds (default: 7200)
+  -w, --warning SECONDS       Maximum age warning threshold (default: 3600)
+                              Alert if documents are OLDER than this
+  -c, --critical SECONDS      Maximum age critical threshold (default: 7200)
+                              Alert if documents are OLDER than this
+  --min-warning SECONDS       Minimum age warning threshold (excessive activity)
+                              Alert if documents are NEWER than this
+  --min-critical SECONDS      Minimum age critical threshold (excessive activity)
+                              Alert if documents are NEWER than this
   -t, --timestamp-field NAME  Timestamp field name (default: @timestamp)
   -H, --host URL              OpenSearch URL (default: https://localhost:9200)
   -k, --insecure              Skip SSL certificate verification
@@ -166,6 +172,44 @@ For indices with multiple sources at varying frequencies, use `--min-unique` to 
 # Logstash-style timestamp
 ./check_opensearch_index.py -i logstash-* -t timestamp -w 600 -c 1200
 ```
+
+### Excessive Activity Monitoring
+
+Monitor for TOO MUCH activity (infinite loops, excessive logging, attacks, disk space issues):
+
+```bash
+# Error logs should be rare - alert if too frequent
+# Warn if oldest of 10 docs is < 5 minutes old, critical if < 1 minute
+./check_opensearch_index.py -i error-logs-* --min-unique 10 \
+  --min-warning 300 --min-critical 60 -w 86400 -c 172800
+
+# Debug logging should be disabled in production
+# Alert if ANY debug logs appear (oldest of 5 docs < 1 hour old)
+./check_opensearch_index.py -i app-logs -w 3600 -c 7200 \
+  --filter '{"term": {"level.keyword": "DEBUG"}}' \
+  --min-unique 5 --min-warning 3600
+
+# Detect DoS/attack patterns - too many 4xx/5xx errors
+./check_opensearch_index.py -i nginx-access-* --min-unique 100 \
+  --filter '{"range": {"status": {"gte": 400}}}' \
+  --min-warning 60 --min-critical 10 -w 3600 -c 7200
+
+# Application should only log once per minute normally
+# Alert if logging faster than every 10 seconds
+./check_opensearch_index.py -i app-audit-* --min-unique 10 \
+  --min-warning 10 -w 3600 -c 7200
+```
+
+**How it works:**
+- `--min-warning` / `--min-critical` check if oldest document is TOO NEW (excessive activity)
+- `-w` / `-c` still check if oldest document is TOO OLD (insufficient activity)
+- Both can be used together to create an acceptable range
+
+**Example:** With `--min-unique 10 --min-warning 300 -w 3600`:
+- Fetches 10 most recent documents
+- CRITICAL: if oldest is > 3600s (no activity)
+- WARNING: if oldest is < 300s (too much activity)
+- OK: if oldest is between 300s and 3600s
 
 ### Filtering Documents
 
