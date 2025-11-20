@@ -358,36 +358,43 @@ def main():
         print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
         sys.exit(STATE_CRITICAL)
 
-    # Process documents
+    # Parse timestamps - only need newest (first) and oldest (last)
     now = datetime.now(timezone.utc)
-    doc_ages = []  # List of age in seconds for each document
 
-    for doc in documents:
-        # Extract timestamp
-        timestamp_value = doc.get('_source', {}).get(args.timestamp_field)
+    # Parse newest document (first in sorted results)
+    newest_doc = documents[0]
+    newest_timestamp_value = newest_doc.get('_source', {}).get(args.timestamp_field)
 
-        if not timestamp_value:
-            print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in document")
-            sys.exit(STATE_CRITICAL)
+    if not newest_timestamp_value:
+        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in newest document")
+        sys.exit(STATE_CRITICAL)
 
-        # Parse timestamp
-        doc_time = parse_timestamp(timestamp_value)
+    newest_time = parse_timestamp(newest_timestamp_value)
+    if newest_time is None:
+        print(f"CRITICAL: Unable to parse newest timestamp: {newest_timestamp_value}")
+        sys.exit(STATE_CRITICAL)
 
-        if doc_time is None:
-            print(f"CRITICAL: Unable to parse timestamp: {timestamp_value}")
-            sys.exit(STATE_CRITICAL)
+    newest_age = int((now - newest_time).total_seconds())
 
-        age_seconds = int((now - doc_time).total_seconds())
-        doc_ages.append(age_seconds)
+    # Parse oldest document (last in sorted results)
+    oldest_doc = documents[-1]
+    oldest_timestamp_value = oldest_doc.get('_source', {}).get(args.timestamp_field)
 
-    # Get newest and oldest document ages
-    newest_age = doc_ages[0]  # First document (sorted DESC by timestamp in query)
-    oldest_age = doc_ages[-1]  # Last document
+    if not oldest_timestamp_value:
+        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in oldest document")
+        sys.exit(STATE_CRITICAL)
+
+    oldest_time = parse_timestamp(oldest_timestamp_value)
+    if oldest_time is None:
+        print(f"CRITICAL: Unable to parse oldest timestamp: {oldest_timestamp_value}")
+        sys.exit(STATE_CRITICAL)
+
+    oldest_age = int((now - oldest_time).total_seconds())
 
     if args.verbose:
         print(f"DEBUG: Newest document age: {newest_age}s", file=sys.stderr)
         print(f"DEBUG: Oldest document age: {oldest_age}s", file=sys.stderr)
-        print(f"DEBUG: Processed {len(doc_ages)} documents", file=sys.stderr)
+        print(f"DEBUG: Checked {len(documents)} documents", file=sys.stderr)
 
     # Check for excessive activity (minimum age thresholds) - CRITICAL takes precedence
     if args.min_critical is not None and oldest_age < args.min_critical:
