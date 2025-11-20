@@ -74,8 +74,7 @@ EOF
 ```
 usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
                                   [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
-                                  [--size SIZE] [--min-unique MIN_UNIQUE]
-                                  [--interval INTERVAL]
+                                  [--min-unique N]
 
 Required:
   -i, --index INDEX           OpenSearch index name or pattern
@@ -88,10 +87,8 @@ Optional:
   -k, --insecure              Skip SSL certificate verification
   -v, --verbose               Verbose output for debugging
 
-Advanced (anti-flapping for high-frequency indices):
-  --size N                    Number of recent documents to fetch (default: 1)
-  --min-unique M              Minimum unique documents required within interval (default: 1)
-  --interval SECONDS          Time window to check for unique documents (default: warning threshold)
+Advanced (anti-flapping for indices with multiple sources):
+  --min-unique N              Require N unique documents, oldest must be within thresholds (default: 1)
 ```
 
 
@@ -107,28 +104,33 @@ Advanced (anti-flapping for high-frequency indices):
 ./check_opensearch_index.py -i app-logs-* -w 3600 -c 14400
 ```
 
-### High-Frequency Indices with Anti-Flapping
+### Indices with Multiple Sources (Anti-Flapping)
 
-For indices with multiple sources at varying frequencies, use `--size` and `--min-unique` to avoid false positives:
+For indices with multiple sources at varying frequencies, use `--min-unique` to avoid false positives:
 
 ```bash
-# Fetch 10 most recent documents, require at least 3 unique within last 60s
+# Require 5 unique documents, oldest must be within thresholds
 # This prevents flapping when one infrequent source stops while others continue
-./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --size 10 --min-unique 3 --interval 60
+./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --min-unique 5
 
-# High-frequency index: fetch 20 docs, need 5 unique within last 30s
-./check_opensearch_index.py -i realtime-* -w 30 -c 120 --size 20 --min-unique 5 --interval 30
+# High-frequency index: need 10 recent unique documents
+./check_opensearch_index.py -i realtime-* -w 30 -c 120 --min-unique 10
 
-# Conservative check: fetch 50 docs, need 10 unique within warning threshold (default interval)
-./check_opensearch_index.py -i activity-* -w 120 -c 600 --size 50 --min-unique 10
+# Conservative check for critical index
+./check_opensearch_index.py -i critical-app-* -w 120 -c 600 --min-unique 20
 ```
 
 **How it works:**
-- Fetches N most recent documents in a single query (efficient!)
-- Checks that at least M unique documents exist within the time interval
-- All documents must have age < critical threshold (or CRITICAL immediately)
-- If fewer than M unique docs in interval → WARNING
-- Much faster than multiple queries with sleep intervals
+- Fetches N most recent documents in a single query (where N = --min-unique)
+- Verifies we got N unique documents (fails if index has < N total docs)
+- Checks that the **oldest** of those N documents is within warning/critical thresholds
+- Single query = fast execution, suitable for NRPE
+
+**Example:** With `--min-unique 5 -w 60 -c 300`:
+- Fetches 5 most recent documents
+- If the 5th-oldest is only 45 seconds old → OK (all 5 are recent)
+- If the 5th-oldest is 90 seconds old → WARNING (not enough recent activity from all sources)
+- If the 5th-oldest is 400 seconds old → CRITICAL (significant inactivity)
 
 ### Custom OpenSearch Instance
 
@@ -161,21 +163,21 @@ For indices with multiple sources at varying frequencies, use `--size` and `--mi
 
 ### OK Status
 ```
-# Single document check
+# Single document check (default)
 OK: Index 'logs-2024' has activity from 5m 23s ago | age=323s;3600;7200;0;
 
 # Multi-document check
-OK: Index 'realtime-*' has activity from 12s ago (5 unique docs in last 30s) | age=12s;30;120;0; unique_docs=5;3;;0;20
+OK: 5 unique documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45s;60;300;0; unique_docs=5;;;;
 ```
 **Exit code:** 0
 
 ### WARNING Status
 ```
-# Age threshold exceeded
+# Age threshold exceeded (single document)
 WARNING: No activity in 'filebeat-*' for 1h 15m (threshold: 1h 0m) | age=4500s;3600;7200;0;
 
-# Insufficient unique documents
-WARNING: Only 2 unique documents in last 1m 0s (threshold: 3) | age=15s;60;300;0; unique_docs=2;3;;0;10
+# Oldest document exceeds warning threshold
+WARNING: Oldest of 5 documents is 1m 25s old (threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0; unique_docs=5;;;;
 ```
 **Exit code:** 1
 
@@ -183,15 +185,20 @@ WARNING: Only 2 unique documents in last 1m 0s (threshold: 3) | age=15s;60;300;0
 ```
 # Age threshold exceeded
 CRITICAL: No activity in 'app-logs' for 3h 45m (threshold: 2h 0m) | age=13500s;3600;7200;0;
+
+# Oldest document exceeds critical threshold
+CRITICAL: Oldest of 10 documents is 6m 40s old (threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0; unique_docs=10;;;;
 ```
 **Exit code:** 2
 
 ### ERROR Cases
 ```
 CRITICAL: No documents found in index 'nonexistent-index'
+CRITICAL: Only 3 documents found, need 5
+CRITICAL: Only 2 unique documents found, need 5
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
 CRITICAL: Connection error: Connection refused
-UNKNOWN: --min-unique cannot be greater than --size
+UNKNOWN: --min-unique must be >= 1
 ```
 **Exit code:** 2 (CRITICAL) or 3 (UNKNOWN)
 
@@ -211,8 +218,8 @@ command[check_opensearch_filebeat]=/usr/lib/nagios/plugins/check_opensearch_inde
 # Check metrics with very short thresholds
 command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index.py -i metrics-* -w 120 -c 300
 
-# High-frequency index with anti-flapping (fetch 20 docs, need 5 unique within 30s)
-command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --size 20 --min-unique 5 --interval 30
+# High-frequency index with anti-flapping (require 5 unique docs, oldest within 30s)
+command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --min-unique 5
 ```
 
 ### Nagios Service Definition
@@ -252,7 +259,7 @@ define service {
 
 The plugin outputs performance data in Nagios format:
 
-### Single Document Mode
+### Single Document Mode (default)
 ```
 age=323s;3600;7200;0;
 ```
@@ -263,19 +270,15 @@ Where:
 - `7200` - Critical threshold
 - `0` - Minimum value (always 0)
 
-### Multi-Document Mode (--size > 1)
+### Multi-Document Mode (--min-unique > 1)
 ```
-age=12s;30;120;0; unique_docs=5;3;;0;20
+age=3s;60;300;0; oldest_age=45s;60;300;0; unique_docs=5;;;;
 ```
 
 Where:
-- `age=12s;30;120;0;` - Same as single document mode (age of most recent document)
-- `unique_docs=5;3;;0;20` - Unique document count metrics:
-  - `5` - Number of unique documents found
-  - `3` - Warning threshold (--min-unique)
-  - (empty) - No critical threshold for this metric
-  - `0` - Minimum value
-  - `20` - Maximum value (--size)
+- `age=3s;60;300;0;` - Age of newest document with thresholds
+- `oldest_age=45s;60;300;0;` - Age of oldest document (this is checked against thresholds)
+- `unique_docs=5;;;;` - Count of unique documents found (informational, no thresholds)
 
 This can be graphed using PNP4Nagios, Grafana, or other monitoring tools.
 
