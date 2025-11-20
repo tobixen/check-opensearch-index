@@ -4,14 +4,16 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 
 ## Features
 
-- ✅ Checks for recent activity in OpenSearch/Elasticsearch indices
+- ✅ Monitors for insufficient activity (documents too old)
+- ✅ Monitors for excessive activity (documents too new - detects runaway processes, attacks)
+- ✅ Anti-flapping: requires N unique recent documents (handles multiple sources at different frequencies)
+- ✅ Flexible filtering: JSON query support to monitor specific document subsets
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
-- ✅ Configurable warning and critical thresholds
-- ✅ Configurable number of recent documents to expect
+- ✅ Configurable warning and critical thresholds (both minimum and maximum age)
 - ✅ Reads credentials from `~/.netrc` (secure)
 - ✅ Performance data output for graphing
-- ✅ Detailed error messages
 - ✅ SSL support with optional verification
+- ✅ Zero external dependencies (Python 3.6+ stdlib only)
 
 There exists a Bash version of the script as well, but it's already deprecated, contains less feautures and will not be maintained.
 
