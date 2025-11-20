@@ -403,7 +403,8 @@ For issues or questions:
 - Check verbose output with `-v` flag
 - Review OpenSearch logs
 - Test manual queries with `curl`
+- Raise an issue at https://github.com/tobixen/check-opensearch-index/issues
 
 ## Author
 
-The initial commit of this was 100% AI-generated, by Claude
+The code was 100% AI-generated, by Claude - but with a Tobias Brox reviewing the results and ensuring good prompts.
