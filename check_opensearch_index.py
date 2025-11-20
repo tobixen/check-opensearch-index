@@ -101,6 +101,13 @@ Examples:
              'Fetches this many recent documents and checks that the oldest is within thresholds.'
     )
 
+    parser.add_argument(
+        '--filter',
+        type=str,
+        help='JSON filter query to apply (e.g., \'{"term": {"field.keyword": "value"}}\'). '
+             'Will be wrapped in a bool filter. Multiple filters can be combined in a JSON array.'
+    )
+
     return parser.parse_args()
 
 
@@ -130,12 +137,13 @@ def get_credentials(host):
         sys.exit(STATE_UNKNOWN)
 
 
-def query_latest_documents(host, index, timestamp_field, username, password, size=1, insecure=False, verbose=False):
+def query_latest_documents(host, index, timestamp_field, username, password, size=1, filter_query=None, insecure=False, verbose=False):
     """
     Query OpenSearch for the most recent documents in the index.
 
     Args:
         size: Number of documents to retrieve (default: 1)
+        filter_query: Optional dict or list of dicts for filtering documents
 
     Returns:
         list: List of documents with timestamps, or empty list if no documents found
@@ -150,6 +158,20 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
         ],
         "_source": [timestamp_field]
     }
+
+    # Add filter if provided
+    if filter_query:
+        # Ensure filter_query is a list
+        if isinstance(filter_query, dict):
+            filters = [filter_query]
+        else:
+            filters = filter_query
+
+        query["query"] = {
+            "bool": {
+                "filter": filters
+            }
+        }
 
     headers = {
         'Content-Type': 'application/json'
@@ -260,6 +282,15 @@ def main():
         print("UNKNOWN: --min-unique must be >= 1")
         sys.exit(STATE_UNKNOWN)
 
+    # Parse filter JSON if provided
+    filter_query = None
+    if args.filter:
+        try:
+            filter_query = json.loads(args.filter)
+        except json.JSONDecodeError as e:
+            print(f"UNKNOWN: Invalid JSON in --filter: {e}")
+            sys.exit(STATE_UNKNOWN)
+
     # Get credentials
     username, password = get_credentials(args.host)
 
@@ -269,6 +300,8 @@ def main():
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
         if args.min_unique > 1:
             print(f"DEBUG: Fetching {args.min_unique} documents, all must be within thresholds", file=sys.stderr)
+        if filter_query:
+            print(f"DEBUG: Applying filter: {json.dumps(filter_query)}", file=sys.stderr)
 
     # Query for latest documents (fetch exactly min_unique documents)
     documents = query_latest_documents(
@@ -278,6 +311,7 @@ def main():
         username,
         password,
         args.min_unique,
+        filter_query,
         args.insecure,
         args.verbose
     )

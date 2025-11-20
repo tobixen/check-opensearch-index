@@ -94,6 +94,9 @@ Optional:
 
 Advanced (anti-flapping for indices with multiple sources):
   --min-unique N              Require N unique documents, oldest must be within thresholds (default: 1)
+
+Filtering:
+  --filter JSON               JSON filter query to apply to document search
 ```
 
 
@@ -163,6 +166,43 @@ For indices with multiple sources at varying frequencies, use `--min-unique` to 
 # Logstash-style timestamp
 ./check_opensearch_index.py -i logstash-* -t timestamp -w 600 -c 1200
 ```
+
+### Filtering Documents
+
+Use `--filter` to monitor specific subsets of documents within an index:
+
+```bash
+# Monitor only documents from a specific host
+./check_opensearch_index.py -i logs-* -w 300 -c 600 \
+  --filter '{"term": {"host.keyword": "webserver-01"}}'
+
+# Monitor documents with specific field values (multiple filters)
+./check_opensearch_index.py -i app-logs -w 300 -c 600 \
+  --filter '[{"term": {"environment.keyword": "production"}}, {"term": {"app.keyword": "api"}}]'
+
+# Numeric field filtering
+./check_opensearch_index.py -i metrics-* -w 120 -c 300 \
+  --filter '{"term": {"site_id": 1}}'
+
+# Wildcard matching
+./check_opensearch_index.py -i logs-* -w 300 -c 600 \
+  --filter '{"wildcard": {"service.keyword": "backend-*"}}'
+
+# Multiple conditions with different types
+./check_opensearch_index.py -i filebeat-* -w 300 -c 600 \
+  --filter '[{"term": {"SM_SITE_ID": "1"}}, {"term": {"SM_BUILD_DOMAIN": "proto.example.com"}}]'
+
+# Range query (documents from last hour only)
+./check_opensearch_index.py -i logs-* -w 300 -c 600 \
+  --filter '{"range": {"@timestamp": {"gte": "now-1h"}}}'
+```
+
+**Filter syntax notes:**
+- Single filter: Pass a JSON object `'{"term": {"field": "value"}}'`
+- Multiple filters (AND): Pass a JSON array `'[{"term": {...}}, {"term": {...}}]'`
+- Text fields: Use `.keyword` suffix for exact matches: `"field.keyword"`
+- Numeric fields: No `.keyword` needed: `"site_id": 1` or `"site_id": "1"`
+- Check your index mapping with: `curl -k --netrc https://localhost:9200/index/_mapping`
 
 ## Output Examples
 
