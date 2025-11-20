@@ -8,7 +8,36 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 ## Disclaimer
 
-As of release 0.1.0, this file was 100% written by a human.
+Changelog for 0.2.0 was AI-generated, the rest of this file was written by a human.
+
+## [0.2.0] - [2025-11-20]
+
+### Changed
+
+- **BREAKING**: Renamed `--min-unique` parameter to `--count` for better clarity
+  - The old name was confusing and sounded like a minimum threshold
+  - New name clearly indicates "number of documents to check"
+  - Update your scripts: `--min-unique 5` → `--count 5`
+
+### Removed
+
+- Removed unnecessary unique document ID validation
+  - OpenSearch already guarantees unique results by document ID
+  - Simplified code and reduced unnecessary checks
+
+### Fixed
+
+- Optimized timestamp parsing to only parse first and last document
+  - Previously parsed all N documents (O(N) complexity)
+  - Now only parses 2 documents regardless of `--count` value (O(1) complexity)
+  - Significant performance improvement for large `--count` values
+
+### Added
+
+- Security documentation for creating read-only monitoring users
+  - Complete instructions for OpenSearch Security Plugin
+  - Alternative instructions for Elasticsearch
+  - Emphasizes least-privilege access (only `indices:data/read/search` permission needed)
 
 ## [0.1.0] - [2025-11-20]
 
