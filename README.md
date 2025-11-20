@@ -13,27 +13,23 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 - ✅ SSL support with optional verification
 - ✅ Two implementations: Python (robust) and Bash (simple)
 
+The Claude AI-tool was prompted to create it in python OR bash, but it chose to create it in python AND bash.  Only the python version will be maintained.
+
+## Alternatives
+
+There is a more generic script at https://github.com/misiupajor/check_elasticsearch - but it's also more complex and comes with more dependencies.
+
 ## Prerequisites
 
-### Python Version
-- Python 3.6+
-- No external dependencies (uses only standard library)
+The suppored python version works even with very old Python versions (3.6+) and uses only standard library.
 
-### Bash Version
-- Bash 4.0+
-- Required commands: `curl`, `jq`, GNU `date`
+The unsupported bash version depends on `curl`, `jq` and GNU `date`.
 
 ## Installation
 
-```bash
-# Copy to Nagios plugins directory
-sudo cp check_opensearch_index.py /usr/lib/nagios/plugins/
-sudo chmod +x /usr/lib/nagios/plugins/check_opensearch_index.py
-
-# Or use the bash version
-sudo cp check_opensearch_index.sh /usr/lib/nagios/plugins/
-sudo chmod +x /usr/lib/nagios/plugins/check_opensearch_index.sh
-```
+* Script should be copied to the nrpe plugin directory, typically /usr/lib/nagios/plugins/
+* The nrpe configuration should be fixed
+* The nagios/icinga/naemon configuration should be set up
 
 ## Credentials Setup
 
@@ -74,7 +70,7 @@ EOF
 ./check_opensearch_index.py -i myindex -t event_timestamp -w 1800 -c 3600
 ```
 
-### Python Version Options
+### Options
 
 ```
 usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
@@ -92,14 +88,6 @@ Optional:
   -v, --verbose               Verbose output for debugging
 ```
 
-### Bash Version Options
-
-```
-usage: check_opensearch_index.sh -i INDEX [-w WARNING] [-c CRITICAL]
-                                  [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
-
-Same options as Python version
-```
 
 ## Examples
 
@@ -363,4 +351,4 @@ For issues or questions:
 
 ## Author
 
-Created for Nagios/NRPE monitoring of OpenSearch/Elasticsearch indices.
+The initial commit of this was 100% AI-generated, by Claude

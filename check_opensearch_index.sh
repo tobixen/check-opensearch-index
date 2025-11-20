@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+## THIS FILE WILL NOT BE MAINTAINED.
+## USE check_opensearch_index.py instead!
+
 #
 # Nagios/NRPE plugin to check OpenSearch index activity (bash version)
 #
