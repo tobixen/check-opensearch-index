@@ -6,6 +6,7 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 
 - ✅ Monitors for insufficient activity (documents too old)
 - ✅ Monitors for excessive activity (documents too new - detects runaway processes, attacks)
+- ✅ **Reverse mode**: Alert on presence of critical messages (errors, security events)
 - ✅ Anti-flapping: requires N unique recent documents (handles multiple sources at different frequencies)
 - ✅ Flexible filtering: JSON query support to monitor specific document subsets
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
@@ -170,7 +171,7 @@ Then use `--netrc` parameter:
 ```
 usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
                                   [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
-                                  [--count N]
+                                  [--count N] [--filter JSON] [--reverse]
 
 Required:
   -i, --index INDEX           OpenSearch index name or pattern
@@ -194,6 +195,12 @@ Advanced (anti-flapping for indices with multiple sources):
 
 Filtering:
   --filter JSON               JSON filter query to apply to document search
+
+Mode:
+  --reverse                   Reverse logic: OK when no documents found, CRITICAL when
+                              documents ARE found. Ignores max age (--warning, --critical).
+                              Use with --filter and --min-warning/--min-critical to alert
+                              on presence of critical log messages.
 
 Credentials:
   --netrc FILE                Path to .netrc file (default: ~/.netrc)
@@ -305,6 +312,50 @@ Monitor for TOO MUCH activity (infinite loops, excessive logging, attacks, disk 
 - WARNING: if oldest is < 300s (too much activity)
 - OK: if oldest is between 300s and 3600s
 
+### Reverse Mode: Alert on Presence of Critical Messages
+
+Use `--reverse` to invert the check logic - alert when specific messages **ARE** found instead of when activity is **missing**. This is useful for monitoring critical errors, FATAL messages, or security events.
+
+```bash
+# Alert CRITICAL if ERROR level logs found in last 5 minutes
+./check_opensearch_index.py -i logs-* \
+  --filter '{"term": {"level.keyword": "ERROR"}}' \
+  --min-critical 300 --reverse
+
+# Alert WARNING if FATAL messages found in last 10 minutes
+./check_opensearch_index.py -i app-* \
+  --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
+  --min-warning 600 --reverse
+
+# Alert if security violations detected in last hour
+./check_opensearch_index.py -i security-logs \
+  --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
+  --min-critical 3600 --reverse
+
+# Alert on database connection errors in last 2 minutes
+./check_opensearch_index.py -i application-* \
+  --filter '{"match_phrase": {"message": "database connection failed"}}' \
+  --min-critical 120 --reverse
+```
+
+**How `--reverse` works:**
+- **No documents found** → Returns **OK** (no critical messages = good)
+- **Documents found newer than `--min-critical`** → Returns **CRITICAL**
+- **Documents found newer than `--min-warning`** → Returns **WARNING**
+- **Documents found but older than thresholds** → Returns **OK** (old errors are fine)
+- Ignores `--warning` and `--critical` (max age thresholds don't apply)
+
+**Example:** With `--reverse --min-critical 300 --filter '{"term": {"level.keyword": "ERROR"}}'`:
+- No ERROR logs in last 5 minutes → OK
+- ERROR log from 2 minutes ago → CRITICAL (newer than 300s)
+- ERROR log from 10 minutes ago → OK (older than 300s, not recent)
+
+**Typical use cases:**
+- Monitor for critical application errors that should never happen
+- Alert on security events (unauthorized access, failed authentication)
+- Detect system failures (out of memory, disk full, database down)
+- Track deployment failures or rollback events
+
 ### Filtering Documents
 
 Use `--filter` to monitor specific subsets of documents within an index:
@@ -391,7 +442,7 @@ UNKNOWN: --count must be >= 1
 Add to `/etc/nagios/nrpe.cfg`:
 
 ```ini
-# Check logs index (using custom netrc location)
+# Normal mode: Check logs index for activity (using custom netrc location)
 command[check_opensearch_logs]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* -w 3600 -c 7200 --netrc /etc/nagios/credentials/opensearch.netrc
 
 # Check filebeat with shorter thresholds
@@ -402,6 +453,12 @@ command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index
 
 # High-frequency index with anti-flapping (check 5 docs, oldest within 30s)
 command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 5 --netrc /etc/nagios/credentials/opensearch.netrc
+
+# Reverse mode: Alert if ERROR logs found in last 5 minutes
+command[check_opensearch_errors]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' --min-critical 300 --reverse --netrc /etc/nagios/credentials/opensearch.netrc
+
+# Reverse mode: Alert if FATAL/CRITICAL messages found in last 10 minutes
+command[check_opensearch_critical]=/usr/lib/nagios/plugins/check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' --min-warning 600 --reverse --netrc /etc/nagios/credentials/opensearch.netrc
 ```
 
 **Note:** The `--netrc` parameter is essential when running as the `nagios`/`nrpe` user, as these system users typically don't have a proper home directory.

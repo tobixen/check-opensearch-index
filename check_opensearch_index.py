@@ -40,6 +40,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Normal mode: Alert if index has NO recent activity
   %(prog)s -i logs-2024 -w 3600 -c 7200
     Check 'logs-2024' index, warn if no activity for 1h, critical at 2h
 
@@ -48,6 +49,13 @@ Examples:
 
   %(prog)s -i myindex -w 1800 -c 3600 -H https://opensearch.local:9200
     Check with custom OpenSearch URL
+
+  # Reverse mode: Alert if critical messages ARE found
+  %(prog)s -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' --min-critical 300 --reverse
+    Alert CRITICAL if ERROR level logs found in last 5 minutes
+
+  %(prog)s -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' --min-warning 600 --reverse
+    Alert WARNING if FATAL/CRITICAL messages found in last 10 minutes
         """
     )
 
@@ -130,6 +138,14 @@ Examples:
         '--netrc',
         type=str,
         help='Path to .netrc file for credentials (default: ~/.netrc)'
+    )
+
+    parser.add_argument(
+        '--reverse',
+        action='store_true',
+        help='Reverse logic: OK when no documents found, CRITICAL when documents found. '
+             'Ignores max age (--warning, --critical). Use with --filter and --min-warning/--min-critical '
+             'to alert on presence of critical log messages.'
     )
 
     return parser.parse_args()
@@ -300,25 +316,33 @@ def main():
     """Main plugin execution."""
     args = parse_args()
 
-    # Validate maximum age thresholds
-    if args.critical < args.warning:
-        print("UNKNOWN: --critical must be >= --warning")
-        sys.exit(STATE_UNKNOWN)
-
-    # Validate minimum age thresholds (if provided)
-    if args.min_warning is not None and args.min_critical is not None:
-        if args.min_critical > args.min_warning:
-            print("UNKNOWN: --min-critical must be <= --min-warning")
+    # In reverse mode, max age thresholds are ignored
+    if not args.reverse:
+        # Validate maximum age thresholds
+        if args.critical < args.warning:
+            print("UNKNOWN: --critical must be >= --warning")
             sys.exit(STATE_UNKNOWN)
 
-    # Check for conflicting thresholds
-    if args.min_warning is not None and args.min_warning >= args.warning:
-        print("UNKNOWN: --min-warning must be < --warning (can't require both too old AND too new)")
-        sys.exit(STATE_UNKNOWN)
+        # Validate minimum age thresholds (if provided)
+        if args.min_warning is not None and args.min_critical is not None:
+            if args.min_critical > args.min_warning:
+                print("UNKNOWN: --min-critical must be <= --min-warning")
+                sys.exit(STATE_UNKNOWN)
 
-    if args.min_critical is not None and args.min_critical >= args.critical:
-        print("UNKNOWN: --min-critical must be < --critical (can't require both too old AND too new)")
-        sys.exit(STATE_UNKNOWN)
+        # Check for conflicting thresholds
+        if args.min_warning is not None and args.min_warning >= args.warning:
+            print("UNKNOWN: --min-warning must be < --warning (can't require both too old AND too new)")
+            sys.exit(STATE_UNKNOWN)
+
+        if args.min_critical is not None and args.min_critical >= args.critical:
+            print("UNKNOWN: --min-critical must be < --critical (can't require both too old AND too new)")
+            sys.exit(STATE_UNKNOWN)
+    else:
+        # In reverse mode, only min-age thresholds make sense
+        if args.min_warning is not None and args.min_critical is not None:
+            if args.min_critical > args.min_warning:
+                print("UNKNOWN: --min-critical must be <= --min-warning")
+                sys.exit(STATE_UNKNOWN)
 
     # Validate count parameter
     if args.count < 1:
@@ -362,13 +386,25 @@ def main():
 
     # Check if any documents found
     if not documents:
-        print(f"CRITICAL: No documents found in index '{args.index}'")
-        sys.exit(STATE_CRITICAL)
+        if args.reverse:
+            # In reverse mode, no documents is OK (no critical messages found)
+            filter_msg = f" matching filter" if filter_query else ""
+            print(f"OK: No documents found{filter_msg} in index '{args.index}'")
+            sys.exit(STATE_OK)
+        else:
+            print(f"CRITICAL: No documents found in index '{args.index}'")
+            sys.exit(STATE_CRITICAL)
 
     # Check if we got enough documents
     if len(documents) < args.count:
-        print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
-        sys.exit(STATE_CRITICAL)
+        if args.reverse:
+            # In reverse mode, fewer documents than requested is OK
+            filter_msg = f" matching filter" if filter_query else ""
+            print(f"OK: Only {len(documents)} document(s) found{filter_msg} (requested {args.count})")
+            sys.exit(STATE_OK)
+        else:
+            print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
+            sys.exit(STATE_CRITICAL)
 
     # Parse timestamps - only need newest (first) and oldest (last)
     now = datetime.now(timezone.utc)
@@ -408,6 +444,42 @@ def main():
         print(f"DEBUG: Oldest document age: {oldest_age}s", file=sys.stderr)
         print(f"DEBUG: Checked {len(documents)} documents", file=sys.stderr)
 
+    # REVERSE MODE: Documents found is bad (critical messages detected)
+    # Only check minimum age thresholds - documents must be newer than threshold to trigger alert
+    if args.reverse:
+        # Check CRITICAL threshold - documents newer than min-critical trigger CRITICAL
+        if args.min_critical is not None and newest_age < args.min_critical:
+            age_formatted = format_duration(newest_age)
+            filter_msg = f" matching filter" if filter_query else ""
+            perfdata = f"age={newest_age}s;;;0;"
+            if args.count > 1:
+                perfdata += f" count={len(documents)};;;0;"
+            print(f"CRITICAL: Found {len(documents)} document(s){filter_msg}, newest is {age_formatted} old "
+                  f"(< {format_duration(args.min_critical)}) | {perfdata}")
+            sys.exit(STATE_CRITICAL)
+
+        # Check WARNING threshold - documents newer than min-warning trigger WARNING
+        if args.min_warning is not None and newest_age < args.min_warning:
+            age_formatted = format_duration(newest_age)
+            filter_msg = f" matching filter" if filter_query else ""
+            perfdata = f"age={newest_age}s;;;0;"
+            if args.count > 1:
+                perfdata += f" count={len(documents)};;;0;"
+            print(f"WARNING: Found {len(documents)} document(s){filter_msg}, newest is {age_formatted} old "
+                  f"(< {format_duration(args.min_warning)}) | {perfdata}")
+            sys.exit(STATE_WARNING)
+
+        # Documents found but older than thresholds - OK (old critical messages are fine)
+        age_formatted = format_duration(newest_age)
+        filter_msg = f" matching filter" if filter_query else ""
+        perfdata = f"age={newest_age}s;;;0;"
+        if args.count > 1:
+            perfdata += f" count={len(documents)};;;0;"
+        print(f"OK: Found {len(documents)} document(s){filter_msg}, but newest is {age_formatted} old "
+              f"(older than thresholds) | {perfdata}")
+        sys.exit(STATE_OK)
+
+    # NORMAL MODE: Check for activity issues
     # Check for excessive activity (minimum age thresholds) - CRITICAL takes precedence
     if args.min_critical is not None and oldest_age < args.min_critical:
         age_formatted = format_duration(oldest_age)
