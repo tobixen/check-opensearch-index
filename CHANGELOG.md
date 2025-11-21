@@ -8,7 +8,32 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 ## Disclaimer
 
-Changelog for 0.2.0 and 0.3.0 was AI-generated, the rest of this file was written by a human.
+Changelog for 0.2.0, 0.3.0 and 0.4.0 was AI-generated, the rest of this file was written by a human.
+
+## [0.4.0] - [2025-11-21]
+
+### Added
+
+- New `--reverse` mode for alert-on-presence monitoring
+  - Inverts check logic: returns OK when no documents found, CRITICAL when documents ARE found
+  - Designed for monitoring critical errors, security events, and exceptional conditions
+  - Ignores max age thresholds (--warning, --critical) in reverse mode
+  - Only uses min-age thresholds (--min-warning, --min-critical) to filter recent events
+  - Example use case: Alert CRITICAL if ERROR logs found in last 5 minutes
+  - Combines with `--filter` to search for specific message patterns
+  - Typical applications:
+    - Critical application errors that should never happen
+    - Security violations (unauthorized access, failed authentication)
+    - System failures (out of memory, disk full, database down)
+    - Deployment failures or rollback events
+
+### Changed
+
+- Updated help text with reverse mode examples
+- Enhanced README with comprehensive reverse mode documentation
+  - New "Reverse Mode" section with use cases and examples
+  - Updated Features list to highlight reverse mode capability
+  - Added NRPE configuration examples for reverse mode monitoring
 
 ## [0.3.0] - [2025-11-20]
 
