@@ -42,12 +42,12 @@ The deprecated Bash script depends on `curl`, `jq` and GNU `date`.
 
 ### Create a Read-Only Monitoring User (Recommended)
 
-**Do not use the admin user for monitoring!** Create a dedicated read-only user with minimal permissions:
+Create a dedicated monitoring user with minimal permissions:
 
 ```bash
 # Create a role with read-only access to indices
 curl -X PUT "https://localhost:9200/_plugins/_security/api/roles/monitoring_role" \
-  -u admin:admin -k -H 'Content-Type: application/json' -d '
+  -u admin:ADMINPASSWORD -k -H 'Content-Type: application/json' -d '
 {
   "cluster_permissions": [],
   "index_permissions": [{
@@ -58,7 +58,7 @@ curl -X PUT "https://localhost:9200/_plugins/_security/api/roles/monitoring_role
 
 # Create a monitoring user
 curl -X PUT "https://localhost:9200/_plugins/_security/api/internalusers/monitoring" \
-  -u admin:admin -k -H 'Content-Type: application/json' -d '
+  -u admin:ADMINPASSWORD -k -H 'Content-Type: application/json' -d '
 {
   "password": "your-secure-password-here",
   "backend_roles": [],
@@ -67,7 +67,7 @@ curl -X PUT "https://localhost:9200/_plugins/_security/api/internalusers/monitor
 
 # Map the user to the role
 curl -X PUT "https://localhost:9200/_plugins/_security/api/rolesmapping/monitoring_role" \
-  -u admin:admin -k -H 'Content-Type: application/json' -d '
+  -u admin:ADMINPASSWORD -k -H 'Content-Type: application/json' -d '
 {
   "backend_roles": [],
   "hosts": [],
@@ -99,56 +99,27 @@ curl -X POST "https://localhost:9200/_security/user/monitoring" \
 
 ### Credentials Setup
 
-Add the monitoring user credentials to `~/.netrc`:
+Add the monitoring user credentials to a netrc file.  The best is to use `~/.netrc`, but when running through nrpe, it's usually run as the nrpe or nagios user, this user often comes without a proper home directory, so perhaps `/etc/nagios/netrc` is a better location:
 
 ```bash
-cat >> ~/.netrc <<EOF
+sudo tee /etc/nagios/netrc <<EOF
 machine localhost
   login monitoring
   password your-secure-password-here
 EOF
 
-chmod 600 ~/.netrc
+chmod 600 /etc/nagios/netrc
 ```
 
-For custom hosts:
-```bash
-cat >> ~/.netrc <<EOF
-machine opensearch.example.com
-  login monitoring
-  password your-secure-password-here
-EOF
-```
+... or replace `localhost` with the location of your opensearch instance.
+
+The netrc-file may contain several machine sections separated by a blank line, if needed.
 
 **Security notes:**
 - The monitoring user only needs `indices:data/read/search` permission (read-only)
 - Never use admin credentials for monitoring
-- Ensure `.netrc` has `600` permissions (readable only by owner)
+- Ensure `netrc` has `600` permissions (readable only by owner)
 - Consider restricting the monitoring role to specific indices if needed
-
-**For NRPE/system users with non-standard home directories:**
-
-If running as the `nagios` or `nrpe` user (which may have `/` or `/var/run/nrpe` as home), use a custom netrc location:
-
-```bash
-# Create netrc file in a dedicated location
-sudo mkdir -p /etc/nagios/credentials
-sudo cat > /etc/nagios/credentials/opensearch.netrc <<EOF
-machine localhost
-  login monitoring
-  password your-secure-password-here
-EOF
-
-# Set proper permissions
-sudo chmod 600 /etc/nagios/credentials/opensearch.netrc
-sudo chown nagios:nagios /etc/nagios/credentials/opensearch.netrc
-```
-
-Then use `--netrc` parameter:
-```bash
-./check_opensearch_index.py -i logs-* -w 300 -c 600 \
-  --netrc /etc/nagios/credentials/opensearch.netrc
-```
 
 ## Usage
 
@@ -213,52 +184,25 @@ Credentials:
 
 ### Anti-Flapping with --count
 
-Use `--count` for indices with multiple sources - checks that the Nth oldest document is recent:
+To reduce the "jitter" in the monitoring, as well as being able to give alarms if the frequency of logging drops a lot (but does not stop), it's possible to add the `--count` argument - set it to 5 and it will take out the 5 most recent documents and consider the age of the fifth.
 
 ```bash
 # Check 5 recent docs; if 5th oldest is stale, at least one source stopped
 ./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --count 5
 
-# High-frequency: verify 10 docs all recent
-./check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 10
+# High-frequency: verify 100 docs all recent
+./check_opensearch_index.py -i realtime-* -w 60 -c 300 --count 100
 ```
 
 ### Excessive Activity Detection
 
-Monitor for TOO MUCH activity using `--min-warning`/`--min-critical`:
+Too much activity is often bad - it may be an indication that something is seriously wrong, and it may eat up all available disk space.  You may monitor for TOO MUCH activity using `--min-warning`/`--min-critical`:
 
 ```bash
-# Error logs should be rare; alert if 10 errors in < 5 minutes
-./check_opensearch_index.py -i error-logs-* --count 10 --min-warning 300 -w 86400 -c 172800
-
-# Detect DoS: 100 HTTP errors in < 60 seconds is critical
-./check_opensearch_index.py -i nginx-* --count 100 --min-critical 60 -w 3600 -c 7200 \
-  --filter '{"range": {"status": {"gte": 400}}}'
+# The "my-logs" index is supposed to have around 100 documents pr minute.  
+# Alert if it takes more than 10m or less than 10s to produce 100 documents.
+./check_opensearch_index.py -i my-logs-* --count 100 --min-critical 10 --min-warning 30 -w 180 -c 600
 ```
-
-### Reverse Mode: Alert on Presence
-
-Use `--reverse` to alert when specific messages ARE found (inverts logic):
-
-```bash
-# Alert if ERROR logs found in last 5 minutes
-./check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' \
-  --min-critical 300 --reverse
-
-# Warn if FATAL/CRITICAL messages in last 10 minutes
-./check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
-  --min-warning 600 --reverse
-
-# Security monitoring: alert on unauthorized access
-./check_opensearch_index.py -i security-* --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
-  --min-critical 3600 --reverse
-```
-
-**Reverse mode behavior:**
-- No matching documents → **OK**
-- Documents found but older than threshold → **OK**
-- Documents newer than `--min-critical` → **CRITICAL**
-- Documents newer than `--min-warning` → **WARNING**
 
 ### Filtering Documents
 
@@ -280,6 +224,35 @@ Monitor specific subsets with `--filter` (JSON Elasticsearch query):
 ```
 
 **Filter notes:** Text fields need `.keyword` suffix for exact match. Numeric fields don't. Check mapping: `curl -k --netrc https://localhost:9200/index/_mapping`
+
+### Reverse Mode: Alert on Presence
+
+Use `--reverse` to alert when specific messages ARE found.
+
+```bash
+# Error logs index should have few hits; warn if 10 errors in < 5 minutes
+./check_opensearch_index.py -i error-logs-* --count 10 --min-warning 300 --reverse
+
+# Detect DoS: 100 HTTP errors in < 60 seconds is critical
+./check_opensearch_index.py -i nginx-* --count 100 --min-critical 60 --reverse \
+  --filter '{"range": {"status": {"gte": 400}}}'
+
+# Alert if ERROR logs found in last 5 minutes
+./check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' \
+  --min-critical 300 --reverse
+
+# Warn if FATAL/CRITICAL messages in last 10 minutes
+./check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
+  --min-warning 600 --reverse
+
+# Security monitoring: alert on unauthorized access
+./check_opensearch_index.py -i security-* --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
+  --min-critical 3600 --reverse
+```
+
+**Reverse mode behavior:**
+* Gives OK if there are no or less than `count` documents found (without reverse it will raise a CRITICAL)
+* `-w` and `-c` should not be given (without reverse they are mandatory)
 
 ## Output Examples
 

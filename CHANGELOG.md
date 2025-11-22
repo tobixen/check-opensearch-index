@@ -8,9 +8,9 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 ## Disclaimer
 
-Changelog for 0.2.0, 0.3.0 and 0.4.0 was AI-generated, the rest of this file was written by a human.
+Quite much of the changelog was AI-generated
 
-## [0.4.0] - [2025-11-21]
+## [0.4.0] - [unreleased]
 
 ### Added
 
@@ -69,8 +69,6 @@ Changelog for 0.2.0, 0.3.0 and 0.4.0 was AI-generated, the rest of this file was
 ### Fixed
 
 - Optimized timestamp parsing to only parse first and last document
-  - Previously parsed all N documents (O(N) complexity)
-  - Now only parses 2 documents regardless of `--count` value (O(1) complexity)
   - Significant performance improvement for large `--count` values
 
 ### Added
