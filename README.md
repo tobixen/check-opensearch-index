@@ -6,9 +6,9 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 
 - ✅ Monitors for insufficient activity (documents too old)
 - ✅ Monitors for excessive activity (documents too new - detects runaway processes, attacks)
-- ✅ **Reverse mode**: Alert on presence of critical messages (errors, security events)
-- ✅ Anti-flapping: requires N unique recent documents (handles multiple sources at different frequencies)
+- ✅ Anti-flapping: Look at the Nth newest document rather than the newest
 - ✅ Flexible filtering: JSON query support to monitor specific document subsets
+- ✅ Reverse mode with filtering: alert on presence of critical messages (errors, security events)
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
 - ✅ Configurable warning and critical thresholds (both minimum and maximum age)
 - ✅ Reads credentials from `~/.netrc` (secure)
@@ -152,20 +152,6 @@ Then use `--netrc` parameter:
 
 ## Usage
 
-### Basic Usage
-
-```bash
-# Check 'logs-2024' index with default thresholds (1h warning, 2h critical)
-./check_opensearch_index.py -i logs-2024
-
-# Check with custom thresholds
-./check_opensearch_index.py -i filebeat-* -w 300 -c 600
-  # Warn if no activity for 5 minutes, critical at 10 minutes
-
-# Check with custom timestamp field
-./check_opensearch_index.py -i myindex -t event_timestamp -w 1800 -c 3600
-```
-
 ### Options
 
 ```
@@ -209,231 +195,110 @@ Credentials:
 
 ## Examples
 
-### Standard Log Monitoring
+### Basic Monitoring
 
 ```bash
-# Filebeat logs - warn after 10 min, critical after 30 min
-./check_opensearch_index.py -i filebeat-* -w 600 -c 1800
+# Default thresholds (1h warning, 2h critical)
+./check_opensearch_index.py -i logs-2024
 
-# Application logs - warn after 1h, critical after 4h
-./check_opensearch_index.py -i app-logs-* -w 3600 -c 14400
+# Custom thresholds: warn at 5m, critical at 10m
+./check_opensearch_index.py -i filebeat-* -w 300 -c 600
+
+# Custom timestamp field (Vector uses 'timestamp', Filebeat uses '@timestamp')
+./check_opensearch_index.py -i vector-logs -t timestamp -w 600 -c 1200
+
+# Remote host with self-signed cert
+./check_opensearch_index.py -i logs -H https://opensearch.example.com:9200 -k -w 600 -c 1800
 ```
 
-### Indices with Multiple Sources (Anti-Flapping)
+### Anti-Flapping with --count
 
-For indices with multiple sources at varying frequencies, use `--count` to avoid false positives:
+Use `--count` for indices with multiple sources - checks that the Nth oldest document is recent:
 
 ```bash
-# Check 5 recent documents, oldest must be within thresholds
-# This prevents flapping when one infrequent source stops while others continue
+# Check 5 recent docs; if 5th oldest is stale, at least one source stopped
 ./check_opensearch_index.py -i mixed-logs-* -w 60 -c 300 --count 5
 
-# High-frequency index: check 10 recent documents
+# High-frequency: verify 10 docs all recent
 ./check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 10
-
-# Conservative check for critical index
-./check_opensearch_index.py -i critical-app-* -w 120 -c 600 --count 20
 ```
 
-**How it works:**
-- Fetches N most recent documents in a single query (where N = --count)
-- Verifies we got N unique documents (fails if index has < N total docs)
-- Checks that the **oldest** of those N documents is within warning/critical thresholds
-- Single query = fast execution, suitable for NRPE
+### Excessive Activity Detection
 
-**Example:** With `--count 5 -w 60 -c 300`:
-- Fetches 5 most recent documents
-- If the 5th-oldest is only 45 seconds old → OK (all 5 are recent)
-- If the 5th-oldest is 90 seconds old → WARNING (not enough recent activity from all sources)
-- If the 5th-oldest is 400 seconds old → CRITICAL (significant inactivity)
-
-### Custom OpenSearch Instance
+Monitor for TOO MUCH activity using `--min-warning`/`--min-critical`:
 
 ```bash
-# Remote OpenSearch with custom port
-./check_opensearch_index.py \
-  -i production-logs-* \
-  -H https://opensearch.prod.example.com:9200 \
-  -w 600 -c 1800
+# Error logs should be rare; alert if 10 errors in < 5 minutes
+./check_opensearch_index.py -i error-logs-* --count 10 --min-warning 300 -w 86400 -c 172800
 
-# Development instance with self-signed cert
-./check_opensearch_index.py \
-  -i dev-logs \
-  -H https://dev-opensearch:9200 \
-  -k \
-  -w 3600 -c 7200
+# Detect DoS: 100 HTTP errors in < 60 seconds is critical
+./check_opensearch_index.py -i nginx-* --count 100 --min-critical 60 -w 3600 -c 7200 \
+  --filter '{"range": {"status": {"gte": 400}}}'
 ```
 
-### Different Timestamp Fields
+### Reverse Mode: Alert on Presence
+
+Use `--reverse` to alert when specific messages ARE found (inverts logic):
 
 ```bash
-# Custom timestamp field
-./check_opensearch_index.py -i custom-index -t event_time -w 1800 -c 3600
-
-# Logstash-style timestamp
-./check_opensearch_index.py -i logstash-* -t timestamp -w 600 -c 1200
-```
-
-### Excessive Activity Monitoring
-
-Monitor for TOO MUCH activity (infinite loops, excessive logging, attacks, disk space issues):
-
-```bash
-# Error logs should be rare - alert if too frequent
-# Warn if oldest of 10 docs is < 5 minutes old, critical if < 1 minute
-./check_opensearch_index.py -i error-logs-* --count 10 \
-  --min-warning 300 --min-critical 60 -w 86400 -c 172800
-
-# Debug logging should be disabled in production
-# Alert if ANY debug logs appear (oldest of 5 docs < 1 hour old)
-./check_opensearch_index.py -i app-logs -w 3600 -c 7200 \
-  --filter '{"term": {"level.keyword": "DEBUG"}}' \
-  --count 5 --min-warning 3600
-
-# Detect DoS/attack patterns - too many 4xx/5xx errors
-./check_opensearch_index.py -i nginx-access-* --count 100 \
-  --filter '{"range": {"status": {"gte": 400}}}' \
-  --min-warning 60 --min-critical 10 -w 3600 -c 7200
-
-# Application should only log once per minute normally
-# Alert if logging faster than every 10 seconds
-./check_opensearch_index.py -i app-audit-* --count 10 \
-  --min-warning 10 -w 3600 -c 7200
-```
-
-**How it works:**
-- `--min-warning` / `--min-critical` check if oldest document is TOO NEW (excessive activity)
-- `-w` / `-c` still check if oldest document is TOO OLD (insufficient activity)
-- Both can be used together to create an acceptable range
-
-**Example:** With `--count 10 --min-warning 300 -w 3600`:
-- Fetches 10 most recent documents
-- CRITICAL: if oldest is > 3600s (no activity)
-- WARNING: if oldest is < 300s (too much activity)
-- OK: if oldest is between 300s and 3600s
-
-### Reverse Mode: Alert on Presence of Critical Messages
-
-Use `--reverse` to invert the check logic - alert when specific messages **ARE** found instead of when activity is **missing**. This is useful for monitoring critical errors, FATAL messages, or security events.
-
-```bash
-# Alert CRITICAL if ERROR level logs found in last 5 minutes
-./check_opensearch_index.py -i logs-* \
-  --filter '{"term": {"level.keyword": "ERROR"}}' \
+# Alert if ERROR logs found in last 5 minutes
+./check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' \
   --min-critical 300 --reverse
 
-# Alert WARNING if FATAL messages found in last 10 minutes
-./check_opensearch_index.py -i app-* \
-  --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
+# Warn if FATAL/CRITICAL messages in last 10 minutes
+./check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
   --min-warning 600 --reverse
 
-# Alert if security violations detected in last hour
-./check_opensearch_index.py -i security-logs \
-  --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
+# Security monitoring: alert on unauthorized access
+./check_opensearch_index.py -i security-* --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
   --min-critical 3600 --reverse
-
-# Alert on database connection errors in last 2 minutes
-./check_opensearch_index.py -i application-* \
-  --filter '{"match_phrase": {"message": "database connection failed"}}' \
-  --min-critical 120 --reverse
 ```
 
-**How `--reverse` works:**
-- **No documents found** → Returns **OK** (no critical messages = good)
-- **Documents found newer than `--min-critical`** → Returns **CRITICAL**
-- **Documents found newer than `--min-warning`** → Returns **WARNING**
-- **Documents found but older than thresholds** → Returns **OK** (old errors are fine)
-- Ignores `--warning` and `--critical` (max age thresholds don't apply)
-
-**Example:** With `--reverse --min-critical 300 --filter '{"term": {"level.keyword": "ERROR"}}'`:
-- No ERROR logs in last 5 minutes → OK
-- ERROR log from 2 minutes ago → CRITICAL (newer than 300s)
-- ERROR log from 10 minutes ago → OK (older than 300s, not recent)
-
-**Typical use cases:**
-- Monitor for critical application errors that should never happen
-- Alert on security events (unauthorized access, failed authentication)
-- Detect system failures (out of memory, disk full, database down)
-- Track deployment failures or rollback events
+**Reverse mode behavior:**
+- No matching documents → **OK**
+- Documents found but older than threshold → **OK**
+- Documents newer than `--min-critical` → **CRITICAL**
+- Documents newer than `--min-warning` → **WARNING**
 
 ### Filtering Documents
 
-Use `--filter` to monitor specific subsets of documents within an index:
+Monitor specific subsets with `--filter` (JSON Elasticsearch query):
 
 ```bash
-# Monitor only documents from a specific host
-./check_opensearch_index.py -i logs-* -w 300 -c 600 \
-  --filter '{"term": {"host.keyword": "webserver-01"}}'
+# Specific host
+./check_opensearch_index.py -i logs-* -w 300 -c 600 --filter '{"term": {"host.keyword": "web-01"}}'
 
-# Monitor documents with specific field values (multiple filters)
+# Multiple conditions (AND)
 ./check_opensearch_index.py -i app-logs -w 300 -c 600 \
-  --filter '[{"term": {"environment.keyword": "production"}}, {"term": {"app.keyword": "api"}}]'
+  --filter '[{"term": {"env.keyword": "prod"}}, {"term": {"app.keyword": "api"}}]'
 
-# Numeric field filtering
-./check_opensearch_index.py -i metrics-* -w 120 -c 300 \
-  --filter '{"term": {"site_id": 1}}'
+# Numeric field
+./check_opensearch_index.py -i metrics-* -w 120 -c 300 --filter '{"term": {"site_id": 1}}'
 
-# Wildcard matching
-./check_opensearch_index.py -i logs-* -w 300 -c 600 \
-  --filter '{"wildcard": {"service.keyword": "backend-*"}}'
-
-# Multiple conditions with different types
-./check_opensearch_index.py -i filebeat-* -w 300 -c 600 \
-  --filter '[{"term": {"SM_SITE_ID": "1"}}, {"term": {"SM_BUILD_DOMAIN": "proto.example.com"}}]'
-
-# Range query (documents from last hour only)
-./check_opensearch_index.py -i logs-* -w 300 -c 600 \
-  --filter '{"range": {"@timestamp": {"gte": "now-1h"}}}'
+# Wildcard
+./check_opensearch_index.py -i logs-* -w 300 -c 600 --filter '{"wildcard": {"service.keyword": "backend-*"}}'
 ```
 
-**Filter syntax notes:**
-- Single filter: Pass a JSON object `'{"term": {"field": "value"}}'`
-- Multiple filters (AND): Pass a JSON array `'[{"term": {...}}, {"term": {...}}]'`
-- Text fields: Use `.keyword` suffix for exact matches: `"field.keyword"`
-- Numeric fields: No `.keyword` needed: `"site_id": 1` or `"site_id": "1"`
-- Check your index mapping with: `curl -k --netrc https://localhost:9200/index/_mapping`
+**Filter notes:** Text fields need `.keyword` suffix for exact match. Numeric fields don't. Check mapping: `curl -k --netrc https://localhost:9200/index/_mapping`
 
 ## Output Examples
 
-### OK Status
 ```
-# Single document check (default)
 OK: Index 'logs-2024' has activity from 5m 23s ago | age=323s;3600;7200;0;
-
-# Multi-document check
 OK: 5 documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45s;60;300;0;
-```
-**Exit code:** 0
 
-### WARNING Status
-```
-# Age threshold exceeded (single document)
-WARNING: No activity in 'filebeat-*' for 1h 15m (threshold: 1h 0m) | age=4500s;3600;7200;0;
+WARNING: Insufficient activity - oldest of 5 documents is 1m 25s old (maximum threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0;
 
-# Oldest document exceeds warning threshold
-WARNING: Oldest of 5 documents is 1m 25s old (threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0;
-```
-**Exit code:** 1
-
-### CRITICAL Status
-```
-# Age threshold exceeded
-CRITICAL: No activity in 'app-logs' for 3h 45m (threshold: 2h 0m) | age=13500s;3600;7200;0;
-
-# Oldest document exceeds critical threshold
-CRITICAL: Oldest of 10 documents is 6m 40s old (threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0;
-```
-**Exit code:** 2
-
-### ERROR Cases
-```
+CRITICAL: Insufficient activity - oldest of 10 documents is 6m 40s old (maximum threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0;
 CRITICAL: No documents found in index 'nonexistent-index'
-CRITICAL: Only 3 documents found, need 5
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
-CRITICAL: Connection error: Connection refused
+
 UNKNOWN: --count must be >= 1
 ```
-**Exit code:** 2 (CRITICAL) or 3 (UNKNOWN)
+
+**Exit codes:** 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
+
+**Performance data format:** `age=323s;warning;critical;min;` (suitable for graphing with PNP4Nagios, Grafana, etc.)
 
 ## Nagios/NRPE Configuration
 
@@ -496,150 +361,46 @@ define service {
 /usr/lib/nagios/plugins/check_nrpe -H opensearch-host -c check_opensearch_logs
 ```
 
-## Performance Data
-
-The plugin outputs performance data in Nagios format:
-
-### Single Document Mode (default)
-```
-age=323s;3600;7200;0;
-```
-
-Where:
-- `323s` - Current age of latest document in seconds
-- `3600` - Warning threshold
-- `7200` - Critical threshold
-- `0` - Minimum value (always 0)
-
-### Multi-Document Mode (--count > 1)
-```
-age=3s;60;300;0; oldest_age=45s;60;300;0;
-```
-
-Where:
-- `age=3s;60;300;0;` - Age of newest document with thresholds
-- `oldest_age=45s;60;300;0;` - Age of oldest document (this is checked against thresholds)
-
-This can be graphed using PNP4Nagios, Grafana, or other monitoring tools.
-
 ## Troubleshooting
 
-### Enable Verbose Mode
-
 ```bash
+# Enable verbose mode for debugging
 ./check_opensearch_index.py -i logs-* -v
-```
-
-Output:
-```
-DEBUG: Credentials found in ~/.netrc
-DEBUG: Querying https://localhost:9200/logs-*
-DEBUG: Query response: {...}
-DEBUG: Latest document timestamp: 2024-05-28T14:30:00.123Z
-DEBUG: Current time: 2024-05-28T14:35:23.456Z
-DEBUG: Age: 323 seconds
-OK: Index 'logs-*' has activity from 5m 23s ago | age=323s;3600;7200;0;
 ```
 
 ### Common Issues
 
-**No documents found**
-```
-CRITICAL: No documents found in index 'myindex'
-```
-- Check if index exists: `curl -k --netrc https://localhost:9200/_cat/indices?v`
-- Check index pattern matches: `curl -k --netrc https://localhost:9200/myindex*/_count`
-
-**Timestamp field not found**
-```
-CRITICAL: Timestamp field '@timestamp' not found in document
-```
-- Check field name: `curl -k --netrc https://localhost:9200/myindex/_mapping`
-- Use `-t` option: `./check_opensearch_index.py -i myindex -t event_time`
-
-**Authentication failed**
-```
-CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
-```
-- Verify `.netrc` exists and has correct permissions (600)
-- Check credentials: `curl -k --netrc https://localhost:9200/_cluster/health`
-- Verify hostname in `.netrc` matches URL
-
-**SSL Certificate error**
-```
-CRITICAL: Connection error: [SSL: CERTIFICATE_VERIFY_FAILED]
-```
-- Use `-k` flag for self-signed certs: `./check_opensearch_index.py -i myindex -k`
-- Or install proper CA certificate
-
-**Connection refused**
-```
-CRITICAL: Connection error: Connection refused
-```
-- Check OpenSearch is running: `systemctl status opensearch`
-- Verify port: `netstat -tlnp | grep 9200`
-- Check firewall rules
+| Issue | Solution |
+|-------|----------|
+| `No documents found in index 'myindex'` | Check index exists: `curl -k --netrc https://localhost:9200/_cat/indices?v` |
+| `Timestamp field '@timestamp' not found` | Check mapping: `curl -k --netrc https://localhost:9200/myindex/_mapping`<br>Use `-t timestamp` for Vector logs |
+| `HTTP 401 Unauthorized` | Verify `.netrc` has correct credentials and `600` permissions |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | Use `-k` flag for self-signed certs |
+| `Connection refused` | Check OpenSearch is running: `systemctl status opensearch` |
 
 ## Testing
 
-### Test with Sample Data
-
 ```bash
-# Create test index
+# Create test index and insert recent document
 curl -k --netrc -X PUT https://localhost:9200/test-index
+curl -k --netrc -X POST https://localhost:9200/test-index/_doc -H 'Content-Type: application/json' -d \
+  '{"@timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)'", "message": "test"}'
 
-# Insert test document
-curl -k --netrc -X POST https://localhost:9200/test-index/_doc -H 'Content-Type: application/json' -d '{
-  "@timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)'",
-  "message": "test"
-}'
-
-# Run check
+# Test (should return OK)
 ./check_opensearch_index.py -i test-index -w 60 -c 120
 
-# Should return OK
+# Insert old document to test WARNING
+curl -k --netrc -X POST https://localhost:9200/test-index/_doc -H 'Content-Type: application/json' -d \
+  '{"@timestamp": "'$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%S.%3NZ)'", "message": "old"}'
+./check_opensearch_index.py -i test-index -w 3600 -c 7200  # Should return WARNING
 ```
 
-### Test Warning Threshold
+## Security & Support
 
-```bash
-# Insert old document (2 hours ago)
-curl -k --netrc -X POST https://localhost:9200/test-index/_doc -H 'Content-Type: application/json' -d '{
-  "@timestamp": "'$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%S.%3NZ)'",
-  "message": "old test"
-}'
+**Security:** Use read-only monitoring user, keep `.netrc` at `600` permissions, avoid `-k` in production.
 
-# Check with 1h warning threshold
-./check_opensearch_index.py -i test-index -w 3600 -c 7200
+**Issues:** Check with `-v` flag first, then report at https://github.com/tobixen/check-opensearch-index/issues
 
-# Should return WARNING
-```
+**License:** MIT
 
-## Performance
-
-- **Python version**: ~0.1-0.5 seconds typical execution time
-- **Bash version**: ~0.2-0.6 seconds typical execution time
-- **Network dependent**: Most time spent on OpenSearch query
-
-## Security Considerations
-
-1. **Credentials Storage**: `.netrc` file should have `600` permissions
-2. **SSL Verification**: Only use `-k` flag in development/testing
-3. **Least Privilege**: Use dedicated monitoring user with read-only access
-4. **Network Security**: Consider firewall rules for OpenSearch access
-
-## License
-
-MIT License - Free to use and modify
-
-## Support
-
-For issues or questions:
-- Check verbose output with `-v` flag
-- Review OpenSearch logs
-- Test manual queries with `curl`
-- Raise an issue at https://github.com/tobixen/check-opensearch-index/issues
-
-## Author
-
-The code was 100% AI-generated, by Claude - but with Tobias Brox doing some reviewing and ensuring good prompts.
+**Author:** AI-generated by Claude, reviewed by Tobias Brox
