@@ -18,7 +18,7 @@ Quite much of the changelog was AI-generated
   - Inverts check logic: returns OK when no documents found, CRITICAL when documents ARE found
   - Designed for monitoring critical errors, security events, and exceptional conditions
   - Ignores max age thresholds (--warning, --critical) in reverse mode
-  - Only uses min-age thresholds (--min-warning, --min-critical) to filter recent events
+  - Requires `--min-warning` and/or `--min-critical` to be specified (mandatory in reverse mode)
   - Example use case: Alert CRITICAL if ERROR logs found in last 5 minutes
   - Combines with `--filter` to search for specific message patterns
   - Typical applications:
@@ -27,13 +27,20 @@ Quite much of the changelog was AI-generated
     - System failures (out of memory, disk full, database down)
     - Deployment failures or rollback events
 
+- Secondary default netrc location: `/etc/nagios/netrc`
+  - Script now automatically tries `~/.netrc` first, then `/etc/nagios/netrc` as fallback
+  - No need to specify `--netrc` parameter when using `/etc/nagios/netrc`
+  - Improves NRPE/Nagios deployment experience where users lack proper home directories
+
 ### Changed
 
-- Updated help text with reverse mode examples
+- Updated help text with reverse mode examples and requirements
 - Enhanced README with comprehensive reverse mode documentation
   - New "Reverse Mode" section with use cases and examples
   - Updated Features list to highlight reverse mode capability
   - Added NRPE configuration examples for reverse mode monitoring
+  - Simplified credentials setup documentation
+  - Consolidated overlapping content between Usage and Examples sections (31% reduction in length)
 
 ## [0.3.0] - [2025-11-20]
 

@@ -99,7 +99,7 @@ curl -X POST "https://localhost:9200/_security/user/monitoring" \
 
 ### Credentials Setup
 
-Add the monitoring user credentials to a netrc file.  The best is to use `~/.netrc`, but when running through nrpe, it's usually run as the nrpe or nagios user, this user often comes without a proper home directory, so perhaps `/etc/nagios/netrc` is a better location:
+Add the monitoring user credentials to a netrc file. The script will automatically try `~/.netrc` first, then `/etc/nagios/netrc` as a fallback. For NRPE/Nagios deployments, use `/etc/nagios/netrc`:
 
 ```bash
 sudo tee /etc/nagios/netrc <<EOF
@@ -156,11 +156,11 @@ Filtering:
 Mode:
   --reverse                   Reverse logic: OK when no documents found, CRITICAL when
                               documents ARE found. Ignores max age (--warning, --critical).
-                              Use with --filter and --min-warning/--min-critical to alert
-                              on presence of critical log messages.
+                              Requires --min-warning and/or --min-critical. Use with --filter
+                              to alert on presence of critical log messages.
 
 Credentials:
-  --netrc FILE                Path to .netrc file (default: ~/.netrc)
+  --netrc FILE                Path to .netrc file (default: ~/.netrc, then /etc/nagios/netrc)
 ```
 
 
@@ -251,8 +251,10 @@ Use `--reverse` to alert when specific messages ARE found.
 ```
 
 **Reverse mode behavior:**
-* Gives OK if there are no or less than `count` documents found (without reverse it will raise a CRITICAL)
-* `-w` and `-c` should not be given (without reverse they are mandatory)
+* Returns OK if no (or fewer than `--count`) documents found
+* Returns CRITICAL/WARNING if documents found newer than `--min-critical`/`--min-warning`
+* Requires `--min-warning` and/or `--min-critical` (mandatory in reverse mode)
+* Ignores `-w`/`-c` max age thresholds (don't use them in reverse mode)
 
 ## Output Examples
 

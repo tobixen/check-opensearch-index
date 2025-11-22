@@ -137,15 +137,15 @@ Examples:
     parser.add_argument(
         '--netrc',
         type=str,
-        help='Path to .netrc file for credentials (default: ~/.netrc)'
+        help='Path to .netrc file for credentials (default: ~/.netrc, then /etc/nagios/netrc)'
     )
 
     parser.add_argument(
         '--reverse',
         action='store_true',
         help='Reverse logic: OK when no documents found, CRITICAL when documents found. '
-             'Ignores max age (--warning, --critical). Use with --filter and --min-warning/--min-critical '
-             'to alert on presence of critical log messages.'
+             'Ignores max age (--warning, --critical). Requires --min-warning and/or --min-critical. '
+             'Use with --filter to alert on presence of critical log messages.'
     )
 
     return parser.parse_args()
@@ -157,28 +157,42 @@ def get_credentials(host, netrc_file=None):
 
     Args:
         host: The host URL to get credentials for
-        netrc_file: Optional path to .netrc file (default: ~/.netrc)
+        netrc_file: Optional path to .netrc file (default: ~/.netrc, then /etc/nagios/netrc)
 
     Returns:
         tuple: (username, password) or (None, None) if not found
     """
-    try:
-        # Extract hostname from URL
-        from urllib.parse import urlparse
-        hostname = urlparse(host).hostname or 'localhost'
+    from pathlib import Path
+    from urllib.parse import urlparse
 
-        nrc = netrc.netrc(netrc_file)
-        auth = nrc.authenticators(hostname)
+    # Determine which netrc file to use
+    if netrc_file:
+        netrc_paths = [netrc_file]
+    else:
+        # Try ~/.netrc first, then /etc/nagios/netrc as fallback
+        netrc_paths = [
+            str(Path.home() / '.netrc'),
+            '/etc/nagios/netrc'
+        ]
 
-        if auth:
-            return auth[0], auth[2]  # username, password
-        else:
-            return None, None
-    except FileNotFoundError:
-        return None, None
-    except netrc.NetrcParseError as e:
-        print(f"UNKNOWN: Error parsing .netrc file: {e}")
-        sys.exit(STATE_UNKNOWN)
+    hostname = urlparse(host).hostname or 'localhost'
+
+    for netrc_path in netrc_paths:
+        try:
+            nrc = netrc.netrc(netrc_path)
+            auth = nrc.authenticators(hostname)
+
+            if auth:
+                return auth[0], auth[2]  # username, password
+        except FileNotFoundError:
+            # Try next path
+            continue
+        except netrc.NetrcParseError as e:
+            print(f"UNKNOWN: Error parsing netrc file {netrc_path}: {e}")
+            sys.exit(STATE_UNKNOWN)
+
+    # No credentials found in any file
+    return None, None
 
 
 def query_latest_documents(host, index, timestamp_field, username, password, size=1, filter_query=None, insecure=False, verbose=False):
@@ -338,7 +352,11 @@ def main():
             print("UNKNOWN: --min-critical must be < --critical (can't require both too old AND too new)")
             sys.exit(STATE_UNKNOWN)
     else:
-        # In reverse mode, only min-age thresholds make sense
+        # In reverse mode, only min-age thresholds make sense and at least one is required
+        if args.min_warning is None and args.min_critical is None:
+            print("UNKNOWN: --reverse mode requires --min-warning and/or --min-critical")
+            sys.exit(STATE_UNKNOWN)
+
         if args.min_warning is not None and args.min_critical is not None:
             if args.min_critical > args.min_warning:
                 print("UNKNOWN: --min-critical must be <= --min-warning")
