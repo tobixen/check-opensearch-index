@@ -206,6 +206,8 @@ Too much activity is often bad - it may be an indication that something is serio
 
 ### Filtering Documents
 
+If some index is receiving data from multiple sources, and you need to monitor that a specific source is constantly feeding the index, filters can be useful.  The full query language is available, some examples are given in [FILTERS.md](FILTERS.md)
+
 Monitor specific subsets with `--filter` (JSON Elasticsearch query):
 
 ```bash
@@ -227,7 +229,12 @@ Monitor specific subsets with `--filter` (JSON Elasticsearch query):
 
 ### Reverse Mode: Alert on Presence
 
-Use `--reverse` to alert when specific messages ARE found.
+Use `--reverse` to alert when specific messages ARE found.  This is useful for alarming about:
+
+* Log messages failing to be parsed correctly 
+* A web server delivers too many 500 internal server errors
+* A web server with too slow response time
+* Other critical or unpleasant errors found in some logs
 
 ```bash
 # Error logs index should have few hits; warn if 10 errors in < 5 minutes
