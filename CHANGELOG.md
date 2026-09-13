@@ -42,6 +42,11 @@ Quite much of the changelog was AI-generated
   - Simplified credentials setup documentation
   - Consolidated overlapping content between Usage and Examples sections (31% reduction in length)
 
+### Fixed
+
+- Threshold validation now rejects negative values and combinations that can never return OK
+  (e.g. `-w 60 -c 600 --min-critical 100`)
+
 ## [0.3.0] - [2025-11-20]
 
 ### Added
