@@ -10,13 +10,16 @@ import check_opensearch_index as plugin
 OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
 
 
-def make_hit(age, field="@timestamp"):
-    """A search hit for a document `age` seconds old, as OpenSearch returns it."""
+LONG_MIN = -(2**63)  # sort value OpenSearch gives a document lacking the field
+
+
+def make_hit(age):
+    """A search hit for a document `age` seconds old, as OpenSearch returns it.
+
+    With "_source": false only the sort value (epoch millis) is returned.
+    """
     ts = datetime.now(timezone.utc) - timedelta(seconds=age)
-    return {
-        "_source": {field: ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"},
-        "sort": [int(ts.timestamp() * 1000)],
-    }
+    return {"_id": str(age), "sort": [int(ts.timestamp() * 1000)]}
 
 
 def run(monkeypatch, capsys, argv, ages=(), hits=None, requests=None):
@@ -104,6 +107,36 @@ def test_invalid_arguments(monkeypatch, capsys, argv):
     assert code == UNKNOWN, out
     assert out.startswith("UNKNOWN")
     assert not requests
+
+
+def test_query_sorts_newest_first_on_sort_values(monkeypatch, capsys):
+    requests = []
+    run(monkeypatch, capsys, ["-t", "event.created", "--count", "5"], [1, 2, 3, 4, 5], requests=requests)
+    (request,) = requests
+    query = json.loads(request.data)
+    assert query["size"] == 5
+    assert query["_source"] is False
+    assert query["sort"] == [
+        {"event.created": {"order": "desc", "unmapped_type": "date", "numeric_type": "date"}}
+    ]
+
+
+def test_dotted_timestamp_field(monkeypatch, capsys):
+    code, out = run(monkeypatch, capsys, ["-t", "event.created", "-w", "100", "-c", "1000"], [10])
+    assert code == OK, out
+
+
+def test_timestamp_field_missing(monkeypatch, capsys):
+    hits = [make_hit(1), {"_id": "x", "sort": [LONG_MIN]}]
+    code, out = run(monkeypatch, capsys, ["--count", "2"], hits=hits)
+    assert code == CRITICAL, out
+    assert "'@timestamp' not found" in out
+
+
+def test_hits_out_of_order(monkeypatch, capsys):
+    code, out = run(monkeypatch, capsys, ["--count", "2"], hits=[make_hit(500), make_hit(1)])
+    assert code == UNKNOWN, out
+    assert "out of order" in out
 
 
 def test_valid_min_critical_below_warning(monkeypatch, capsys):

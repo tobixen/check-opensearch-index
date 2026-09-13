@@ -208,13 +208,16 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
     """
     url = f"{host}/{index}/_search"
 
-    # Query to get the most recent documents based on timestamp
+    # Query to get the most recent documents based on timestamp.  The age is
+    # read from the sort value (epoch millis), so _source is not needed.
+    # unmapped_type: indices in a pattern lacking the field must not fail the search
+    # numeric_type: date and date_nanos indices must sort on the same scale
     query = {
         "size": size,
         "sort": [
-            {timestamp_field: {"order": "desc"}}
+            {timestamp_field: {"order": "desc", "unmapped_type": "date", "numeric_type": "date"}}
         ],
-        "_source": [timestamp_field]
+        "_source": False
     }
 
     # Add filter if provided
@@ -279,35 +282,21 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
         sys.exit(STATE_UNKNOWN)
 
 
-def parse_timestamp(timestamp_str):
+# Long.MIN_VALUE: the sort value OpenSearch gives a document lacking the sort field
+MISSING_SORT_VALUE = -(2**63)
+
+
+def document_age(hit, now):
     """
-    Parse ISO 8601 timestamp string to datetime object.
+    Age in whole seconds of a search hit, or None if it lacks the timestamp field.
 
-    Supports various formats including with/without microseconds and timezone.
+    OpenSearch returns the sort value of a date field as epoch millis, whatever
+    the field's format or nesting.
     """
-    # Common timestamp formats
-    formats = [
-        '%Y-%m-%dT%H:%M:%S.%fZ',      # 2024-01-01T12:00:00.123Z
-        '%Y-%m-%dT%H:%M:%SZ',          # 2024-01-01T12:00:00Z
-        '%Y-%m-%dT%H:%M:%S.%f%z',      # 2024-01-01T12:00:00.123+00:00
-        '%Y-%m-%dT%H:%M:%S%z',         # 2024-01-01T12:00:00+00:00
-    ]
-
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(timestamp_str, fmt)
-            # Ensure timezone aware
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            continue
-
-    # Fallback: try fromisoformat (Python 3.7+)
-    try:
-        return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-    except ValueError:
+    value = (hit.get('sort') or [None])[0]
+    if not isinstance(value, (int, float)) or value == MISSING_SORT_VALUE:
         return None
+    return int(now - value / 1000)
 
 
 def format_duration(seconds):
@@ -430,38 +419,21 @@ def main():
             print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
             sys.exit(STATE_CRITICAL)
 
-    # Parse timestamps - only need newest (first) and oldest (last)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).timestamp()
+    ages = [document_age(hit, now) for hit in documents]
 
-    # Parse newest document (first in sorted results)
-    newest_doc = documents[0]
-    newest_timestamp_value = newest_doc.get('_source', {}).get(args.timestamp_field)
-
-    if not newest_timestamp_value:
-        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in newest document")
+    # Documents lacking the field sort last
+    if None in ages:
+        position = "newest" if ages[0] is None else "oldest"
+        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in {position} document")
         sys.exit(STATE_CRITICAL)
 
-    newest_time = parse_timestamp(newest_timestamp_value)
-    if newest_time is None:
-        print(f"CRITICAL: Unable to parse newest timestamp: {newest_timestamp_value}")
-        sys.exit(STATE_CRITICAL)
+    if ages != sorted(ages):
+        print(f"UNKNOWN: OpenSearch returned documents out of order (ages: {ages})")
+        sys.exit(STATE_UNKNOWN)
 
-    newest_age = int((now - newest_time).total_seconds())
-
-    # Parse oldest document (last in sorted results)
-    oldest_doc = documents[-1]
-    oldest_timestamp_value = oldest_doc.get('_source', {}).get(args.timestamp_field)
-
-    if not oldest_timestamp_value:
-        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in oldest document")
-        sys.exit(STATE_CRITICAL)
-
-    oldest_time = parse_timestamp(oldest_timestamp_value)
-    if oldest_time is None:
-        print(f"CRITICAL: Unable to parse oldest timestamp: {oldest_timestamp_value}")
-        sys.exit(STATE_CRITICAL)
-
-    oldest_age = int((now - oldest_time).total_seconds())
+    newest_age = ages[0]
+    oldest_age = ages[-1]
 
     if args.verbose:
         print(f"DEBUG: Newest document age: {newest_age}s", file=sys.stderr)

@@ -46,6 +46,10 @@ Quite much of the changelog was AI-generated
 
 - Threshold validation now rejects negative values and combinations that can never return OK
   (e.g. `-w 60 -c 600 --min-critical 100`)
+- Timestamps are read from the sort value instead of being parsed from the document, which fixes
+  dotted field names (`-t event.created`), epoch-millis values, timestamps without a timezone
+  and `date_nanos` fields
+- Index patterns where some indices lack the timestamp field no longer fail with HTTP 400
 
 ## [0.3.0] - [2025-11-20]
 
