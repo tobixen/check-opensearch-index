@@ -42,6 +42,11 @@ Quite much of the changelog was AI-generated
   - Simplified credentials setup documentation
   - Consolidated overlapping content between Usage and Examples sections (31% reduction in length)
 
+### Removed
+
+- The unmaintained Bash version `check_opensearch_index.sh`.  It had broken duration formatting,
+  swallowed curl errors, and allowed shell command injection through `-w`/`-c`
+
 ### Fixed
 
 - Threshold validation now rejects negative values and combinations that can never return OK

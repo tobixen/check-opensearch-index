@@ -16,8 +16,6 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 - ✅ SSL support with optional verification
 - ✅ Zero external dependencies (Python 3.6+ stdlib only)
 
-There exists a Bash version of the script as well, but it's already deprecated, contains less feautures and will not be maintained.
-
 ## Disclaimer
 
 The script logic was entirely AI-generated - though, human-curated.  While I haven't looked through all of the code, I've done some inspections and come up with some suggestions for improvements.  This README is mostly written by AI, but polished and modified by me.
@@ -29,8 +27,6 @@ There is a more generic script at https://github.com/misiupajor/check_elasticsea
 ## Prerequisites
 
 The Python script works even with very old Python versions (3.6+) and uses only standard library.
-
-The deprecated Bash script depends on `curl`, `jq` and GNU `date`.
 
 ## Installation
 
