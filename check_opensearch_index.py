@@ -17,20 +17,42 @@ Project home: https://github.com/tobixen/check-opensearch-index
 Version: v0.4.0-dev0 (Will someone remember to keep this one up-to-date?)
 """
 
-import sys
 import argparse
+import base64
 import json
 import netrc
-from datetime import datetime, timezone, timedelta
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 import ssl
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 # Nagios plugin exit codes
 STATE_OK = 0
 STATE_WARNING = 1
 STATE_CRITICAL = 2
 STATE_UNKNOWN = 3
+
+STATE_NAMES = {
+    STATE_OK: 'OK',
+    STATE_WARNING: 'WARNING',
+    STATE_CRITICAL: 'CRITICAL',
+    STATE_UNKNOWN: 'UNKNOWN',
+}
+
+# Long.MIN_VALUE: the sort value OpenSearch gives a document lacking the sort field
+MISSING_SORT_VALUE = -(2**63)
+
+
+class CheckError(Exception):
+    """Ends the check early with a Nagios state and a message."""
+
+    def __init__(self, state, message):
+        super().__init__(message)
+        self.state = state
+        self.message = message
 
 
 def parse_args():
@@ -151,6 +173,54 @@ Examples:
     return parser.parse_args()
 
 
+def validate_args(args):
+    """Raise CheckError(UNKNOWN) on invalid argument combinations."""
+    thresholds = {
+        '--warning': args.warning,
+        '--critical': args.critical,
+        '--min-warning': args.min_warning,
+        '--min-critical': args.min_critical,
+    }
+    for name, value in thresholds.items():
+        if value is not None and value < 0:
+            raise CheckError(STATE_UNKNOWN, f"{name} must be >= 0")
+
+    if args.min_warning is not None and args.min_critical is not None:
+        if args.min_critical > args.min_warning:
+            raise CheckError(STATE_UNKNOWN, "--min-critical must be <= --min-warning")
+
+    # In reverse mode, max age thresholds are ignored
+    if not args.reverse:
+        if args.critical < args.warning:
+            raise CheckError(STATE_UNKNOWN, "--critical must be >= --warning")
+
+        # Ages below a min threshold alert, ages from --warning up alert:
+        # the OK range is [max(min thresholds), --warning)
+        lowest_ok_age = max(
+            (v for v in (args.min_warning, args.min_critical) if v is not None),
+            default=0,
+        )
+        if lowest_ok_age >= args.warning:
+            raise CheckError(STATE_UNKNOWN, "thresholds leave no OK range "
+                             "(need --min-warning and --min-critical < --warning <= --critical)")
+    elif args.min_warning is None and args.min_critical is None:
+        # In reverse mode, only min-age thresholds make sense and at least one is required
+        raise CheckError(STATE_UNKNOWN, "--reverse mode requires --min-warning and/or --min-critical")
+
+    if args.count < 1:
+        raise CheckError(STATE_UNKNOWN, "--count must be >= 1")
+
+
+def parse_filter(filter_json):
+    """Parse the --filter JSON, or return None if no filter was given."""
+    if not filter_json:
+        return None
+    try:
+        return json.loads(filter_json)
+    except json.JSONDecodeError as e:
+        raise CheckError(STATE_UNKNOWN, f"Invalid JSON in --filter: {e}") from e
+
+
 def get_credentials(host, netrc_file=None):
     """
     Get credentials from .netrc file for the given host.
@@ -162,9 +232,6 @@ def get_credentials(host, netrc_file=None):
     Returns:
         tuple: (username, password) or (None, None) if not found
     """
-    from pathlib import Path
-    from urllib.parse import urlparse
-
     # Determine which netrc file to use
     if netrc_file:
         netrc_paths = [netrc_file]
@@ -188,8 +255,7 @@ def get_credentials(host, netrc_file=None):
             # Try next path
             continue
         except netrc.NetrcParseError as e:
-            print(f"UNKNOWN: Error parsing netrc file {netrc_path}: {e}")
-            sys.exit(STATE_UNKNOWN)
+            raise CheckError(STATE_UNKNOWN, f"Error parsing netrc file {netrc_path}: {e}") from e
 
     # No credentials found in any file
     return None, None
@@ -240,7 +306,6 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
 
     # Add basic auth if credentials available
     if username and password:
-        import base64
         credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
         headers['Authorization'] = f'Basic {credentials}'
 
@@ -263,27 +328,15 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
             if verbose:
                 print(f"DEBUG: Query response: {json.dumps(result, indent=2)}", file=sys.stderr)
 
-            hits = result.get('hits', {}).get('hits', [])
-
-            return hits
+            return result.get('hits', {}).get('hits', [])
 
     except HTTPError as e:
         error_body = e.read().decode('utf-8', errors='ignore')
-        print(f"CRITICAL: HTTP {e.code} error querying OpenSearch: {error_body}")
-        sys.exit(STATE_CRITICAL)
+        raise CheckError(STATE_CRITICAL, f"HTTP {e.code} error querying OpenSearch: {error_body}") from e
     except URLError as e:
-        print(f"CRITICAL: Connection error: {e.reason}")
-        sys.exit(STATE_CRITICAL)
+        raise CheckError(STATE_CRITICAL, f"Connection error: {e.reason}") from e
     except json.JSONDecodeError as e:
-        print(f"CRITICAL: Invalid JSON response: {e}")
-        sys.exit(STATE_CRITICAL)
-    except Exception as e:
-        print(f"UNKNOWN: Unexpected error: {e}")
-        sys.exit(STATE_UNKNOWN)
-
-
-# Long.MIN_VALUE: the sort value OpenSearch gives a document lacking the sort field
-MISSING_SORT_VALUE = -(2**63)
+        raise CheckError(STATE_CRITICAL, f"Invalid JSON response: {e}") from e
 
 
 def document_age(hit, now):
@@ -315,63 +368,26 @@ def format_duration(seconds):
         return f"{days}d {hours}h"
 
 
-def main():
-    """Main plugin execution."""
-    args = parse_args()
+def perfdata(args, newest_age, oldest_age, found):
+    """Nagios performance data for the check result."""
+    if args.reverse:
+        data = f"age={oldest_age}s;;;0;"
+        if args.count > 1:
+            data += f" count={found};;;0;"
+        return data
 
-    thresholds = {
-        '--warning': args.warning,
-        '--critical': args.critical,
-        '--min-warning': args.min_warning,
-        '--min-critical': args.min_critical,
-    }
-    for name, value in thresholds.items():
-        if value is not None and value < 0:
-            print(f"UNKNOWN: {name} must be >= 0")
-            sys.exit(STATE_UNKNOWN)
+    thresholds = f"{args.warning};{args.critical};0;"
+    data = f"age={newest_age}s;{thresholds}"
+    if args.count > 1:
+        data += f" oldest_age={oldest_age}s;{thresholds}"
+    return data
 
-    if args.min_warning is not None and args.min_critical is not None:
-        if args.min_critical > args.min_warning:
-            print("UNKNOWN: --min-critical must be <= --min-warning")
-            sys.exit(STATE_UNKNOWN)
 
-    # In reverse mode, max age thresholds are ignored
-    if not args.reverse:
-        if args.critical < args.warning:
-            print("UNKNOWN: --critical must be >= --warning")
-            sys.exit(STATE_UNKNOWN)
+def check(args):
+    """Run the check; return (state, message)."""
+    validate_args(args)
+    filter_query = parse_filter(args.filter)
 
-        # Ages below a min threshold alert, ages from --warning up alert:
-        # the OK range is [max(min thresholds), --warning)
-        lowest_ok_age = max(
-            (v for v in (args.min_warning, args.min_critical) if v is not None),
-            default=0,
-        )
-        if lowest_ok_age >= args.warning:
-            print("UNKNOWN: thresholds leave no OK range "
-                  "(need --min-warning and --min-critical < --warning <= --critical)")
-            sys.exit(STATE_UNKNOWN)
-    else:
-        # In reverse mode, only min-age thresholds make sense and at least one is required
-        if args.min_warning is None and args.min_critical is None:
-            print("UNKNOWN: --reverse mode requires --min-warning and/or --min-critical")
-            sys.exit(STATE_UNKNOWN)
-
-    # Validate count parameter
-    if args.count < 1:
-        print("UNKNOWN: --count must be >= 1")
-        sys.exit(STATE_UNKNOWN)
-
-    # Parse filter JSON if provided
-    filter_query = None
-    if args.filter:
-        try:
-            filter_query = json.loads(args.filter)
-        except json.JSONDecodeError as e:
-            print(f"UNKNOWN: Invalid JSON in --filter: {e}")
-            sys.exit(STATE_UNKNOWN)
-
-    # Get credentials
     username, password = get_credentials(args.host, args.netrc)
 
     if args.verbose:
@@ -397,27 +413,18 @@ def main():
         args.verbose
     )
 
-    # Check if any documents found
+    filter_msg = " matching filter" if filter_query else ""
+
+    # In reverse mode, no or too few documents is OK (no critical messages found)
     if not documents:
         if args.reverse:
-            # In reverse mode, no documents is OK (no critical messages found)
-            filter_msg = f" matching filter" if filter_query else ""
-            print(f"OK: No documents found{filter_msg} in index '{args.index}'")
-            sys.exit(STATE_OK)
-        else:
-            print(f"CRITICAL: No documents found in index '{args.index}'")
-            sys.exit(STATE_CRITICAL)
+            return STATE_OK, f"No documents found{filter_msg} in index '{args.index}'"
+        return STATE_CRITICAL, f"No documents found in index '{args.index}'"
 
-    # Check if we got enough documents
     if len(documents) < args.count:
         if args.reverse:
-            # In reverse mode, fewer documents than requested is OK
-            filter_msg = f" matching filter" if filter_query else ""
-            print(f"OK: Only {len(documents)} document(s) found{filter_msg} (requested {args.count})")
-            sys.exit(STATE_OK)
-        else:
-            print(f"CRITICAL: Only {len(documents)} documents found, need {args.count}")
-            sys.exit(STATE_CRITICAL)
+            return STATE_OK, f"Only {len(documents)} document(s) found{filter_msg} (requested {args.count})"
+        return STATE_CRITICAL, f"Only {len(documents)} documents found, need {args.count}"
 
     now = datetime.now(timezone.utc).timestamp()
     ages = [document_age(hit, now) for hit in documents]
@@ -425,12 +432,10 @@ def main():
     # Documents lacking the field sort last
     if None in ages:
         position = "newest" if ages[0] is None else "oldest"
-        print(f"CRITICAL: Timestamp field '{args.timestamp_field}' not found in {position} document")
-        sys.exit(STATE_CRITICAL)
+        return STATE_CRITICAL, f"Timestamp field '{args.timestamp_field}' not found in {position} document"
 
     if ages != sorted(ages):
-        print(f"UNKNOWN: OpenSearch returned documents out of order (ages: {ages})")
-        sys.exit(STATE_UNKNOWN)
+        return STATE_UNKNOWN, f"OpenSearch returned documents out of order (ages: {ages})"
 
     newest_age = ages[0]
     oldest_age = ages[-1]
@@ -440,94 +445,50 @@ def main():
         print(f"DEBUG: Oldest document age: {oldest_age}s", file=sys.stderr)
         print(f"DEBUG: Checked {len(documents)} documents", file=sys.stderr)
 
+    perf = perfdata(args, newest_age, oldest_age, len(documents))
+    newest_formatted = format_duration(newest_age)
+    oldest_formatted = format_duration(oldest_age)
+
     # REVERSE MODE: Documents found is bad (critical messages detected)
     # Only check minimum age thresholds - the oldest of the --count newest
     # documents must be newer than a threshold to trigger an alert
     if args.reverse:
-        # Check CRITICAL threshold - documents newer than min-critical trigger CRITICAL
-        if args.min_critical is not None and oldest_age < args.min_critical:
-            age_formatted = format_duration(oldest_age)
-            filter_msg = f" matching filter" if filter_query else ""
-            perfdata = f"age={oldest_age}s;;;0;"
-            if args.count > 1:
-                perfdata += f" count={len(documents)};;;0;"
-            print(f"CRITICAL: Found {len(documents)} document(s){filter_msg}, oldest is {age_formatted} old "
-                  f"(< {format_duration(args.min_critical)}) | {perfdata}")
-            sys.exit(STATE_CRITICAL)
-
-        # Check WARNING threshold - documents newer than min-warning trigger WARNING
-        if args.min_warning is not None and oldest_age < args.min_warning:
-            age_formatted = format_duration(oldest_age)
-            filter_msg = f" matching filter" if filter_query else ""
-            perfdata = f"age={oldest_age}s;;;0;"
-            if args.count > 1:
-                perfdata += f" count={len(documents)};;;0;"
-            print(f"WARNING: Found {len(documents)} document(s){filter_msg}, oldest is {age_formatted} old "
-                  f"(< {format_duration(args.min_warning)}) | {perfdata}")
-            sys.exit(STATE_WARNING)
-
+        found = f"Found {len(documents)} document(s){filter_msg}"
+        for state, min_age in ((STATE_CRITICAL, args.min_critical), (STATE_WARNING, args.min_warning)):
+            if min_age is not None and oldest_age < min_age:
+                return state, (f"{found}, oldest is {oldest_formatted} old "
+                               f"(< {format_duration(min_age)}) | {perf}")
         # Documents found but older than thresholds - OK (old critical messages are fine)
-        age_formatted = format_duration(oldest_age)
-        filter_msg = f" matching filter" if filter_query else ""
-        perfdata = f"age={oldest_age}s;;;0;"
-        if args.count > 1:
-            perfdata += f" count={len(documents)};;;0;"
-        print(f"OK: Found {len(documents)} document(s){filter_msg}, but oldest is {age_formatted} old "
-              f"(older than thresholds) | {perfdata}")
-        sys.exit(STATE_OK)
+        return STATE_OK, f"{found}, but oldest is {oldest_formatted} old (older than thresholds) | {perf}"
 
-    # NORMAL MODE: Check for activity issues
-    # Check for excessive activity (minimum age thresholds) - CRITICAL takes precedence
-    if args.min_critical is not None and oldest_age < args.min_critical:
-        age_formatted = format_duration(oldest_age)
-        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
-        print(f"CRITICAL: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
-              f"(minimum threshold: {format_duration(args.min_critical)}) | {perfdata}")
-        sys.exit(STATE_CRITICAL)
-
-    # Check for too little activity (maximum age thresholds) - CRITICAL
-    if oldest_age >= args.critical:
-        age_formatted = format_duration(oldest_age)
-        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
-        print(f"CRITICAL: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
-              f"(maximum threshold: {format_duration(args.critical)}) | {perfdata}")
-        sys.exit(STATE_CRITICAL)
-
-    # Check for excessive activity (minimum age thresholds) - WARNING
-    if args.min_warning is not None and oldest_age < args.min_warning:
-        age_formatted = format_duration(oldest_age)
-        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
-        print(f"WARNING: Excessive activity - oldest of {args.count} documents is only {age_formatted} old "
-              f"(minimum threshold: {format_duration(args.min_warning)}) | {perfdata}")
-        sys.exit(STATE_WARNING)
-
-    # Check for too little activity (maximum age thresholds) - WARNING
-    if oldest_age >= args.warning:
-        age_formatted = format_duration(oldest_age)
-        perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
-        if args.count > 1:
-            perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
-        print(f"WARNING: Insufficient activity - oldest of {args.count} documents is {age_formatted} old "
-              f"(maximum threshold: {format_duration(args.warning)}) | {perfdata}")
-        sys.exit(STATE_WARNING)
-
-    # All checks passed
-    newest_formatted = format_duration(newest_age)
-    oldest_formatted = format_duration(oldest_age)
-    perfdata = f"age={newest_age}s;{args.warning};{args.critical};0;"
+    # NORMAL MODE: too much activity (min age) or too little (max age);
+    # CRITICAL takes precedence
+    oldest_of = f"oldest of {args.count} documents is"
+    for state, min_age, max_age in (
+        (STATE_CRITICAL, args.min_critical, args.critical),
+        (STATE_WARNING, args.min_warning, args.warning),
+    ):
+        if min_age is not None and oldest_age < min_age:
+            return state, (f"Excessive activity - {oldest_of} only {oldest_formatted} old "
+                           f"(minimum threshold: {format_duration(min_age)}) | {perf}")
+        if oldest_age >= max_age:
+            return state, (f"Insufficient activity - {oldest_of} {oldest_formatted} old "
+                           f"(maximum threshold: {format_duration(max_age)}) | {perf}")
 
     if args.count > 1:
-        perfdata += f" oldest_age={oldest_age}s;{args.warning};{args.critical};0;"
-        print(f"OK: {args.count} documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perfdata}")
-    else:
-        print(f"OK: Index '{args.index}' has activity from {newest_formatted} ago | {perfdata}")
-    sys.exit(STATE_OK)
+        return STATE_OK, f"{args.count} documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perf}"
+    return STATE_OK, f"Index '{args.index}' has activity from {newest_formatted} ago | {perf}"
+
+
+def main():
+    """Main plugin execution."""
+    args = parse_args()
+    try:
+        state, message = check(args)
+    except CheckError as e:
+        state, message = e.state, e.message
+    print(f"{STATE_NAMES[state]}: {message}")
+    sys.exit(state)
 
 
 if __name__ == '__main__':
