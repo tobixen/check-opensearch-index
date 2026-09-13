@@ -11,10 +11,10 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 - ✅ Reverse mode with filtering: alert on presence of critical messages (errors, security events)
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
 - ✅ Configurable warning and critical thresholds (both minimum and maximum age)
-- ✅ Reads credentials from `~/.netrc` (secure)
+- ✅ Reads credentials from `~/.netrc` or `/etc/nagios/netrc` (secure)
 - ✅ Performance data output for graphing
-- ✅ SSL support with optional verification
-- ✅ Zero external dependencies (Python 3.6+ stdlib only)
+- ✅ SSL support, with a private CA (`--ca-file`) or optionally without verification
+- ✅ Zero external dependencies (Python 3.8+ stdlib only)
 
 ## Disclaimer
 
@@ -26,7 +26,9 @@ There is a more generic script at https://github.com/misiupajor/check_elasticsea
 
 ## Prerequisites
 
-The Python script works even with very old Python versions (3.6+) and uses only standard library.
+The script needs Python 3.8 or newer (the oldest version the test suite runs on) and uses only the standard library.
+
+It works with any OpenSearch version, and with Elasticsearch 7.2 or newer.
 
 ## Installation
 
@@ -104,17 +106,18 @@ machine localhost
   password your-secure-password-here
 EOF
 
-chmod 600 /etc/nagios/netrc
+sudo chown root:nagios /etc/nagios/netrc
+sudo chmod 640 /etc/nagios/netrc
 ```
 
-... or replace `localhost` with the location of your opensearch instance.
+... or replace `localhost` with the location of your opensearch instance.  Use the group the NRPE daemon runs as (`nagios` or `nrpe`, depending on the distribution).
 
 The netrc-file may contain several machine sections separated by a blank line, if needed.
 
 **Security notes:**
 - The monitoring user only needs `indices:data/read/search` permission (read-only)
 - Never use admin credentials for monitoring
-- Ensure `netrc` has `600` permissions (readable only by owner)
+- Keep the netrc file unreadable for others: `640` with the plugin's user in the group, or `600` owned by that user
 - Consider restricting the monitoring role to specific indices if needed
 
 ## Usage
@@ -123,40 +126,45 @@ The netrc-file may contain several machine sections separated by a blank line, i
 
 ```
 usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
-                                  [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
-                                  [--count N] [--filter JSON] [--reverse]
+                                 [--min-warning MIN_WARNING] [--min-critical MIN_CRITICAL]
+                                 [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v] [--ca-file CA_FILE] [-V]
+                                 [--count COUNT] [--filter FILTER] [--netrc NETRC] [--reverse]
 
-Required:
-  -i, --index INDEX           OpenSearch index name or pattern
+Check OpenSearch index activity
 
-Optional:
-  -w, --warning SECONDS       Maximum age warning threshold (default: 3600)
-                              Alert if documents are OLDER than this
-  -c, --critical SECONDS      Maximum age critical threshold (default: 7200)
-                              Alert if documents are OLDER than this
-  --min-warning SECONDS       Minimum age warning threshold (excessive activity)
-                              Alert if documents are NEWER than this
-  --min-critical SECONDS      Minimum age critical threshold (excessive activity)
-                              Alert if documents are NEWER than this
-  -t, --timestamp-field NAME  Timestamp field name (default: @timestamp)
-  -H, --host URL              OpenSearch URL (default: https://localhost:9200)
-  -k, --insecure              Skip SSL certificate verification
-  -v, --verbose               Verbose output for debugging
-
-Advanced (anti-flapping for indices with multiple sources):
-  --count N                   Number of recent documents to check (default: 1)
-
-Filtering:
-  --filter JSON               JSON filter query to apply to document search
-
-Mode:
-  --reverse                   Reverse logic: OK when no documents found, CRITICAL when
-                              documents ARE found. Ignores max age (--warning, --critical).
-                              Requires --min-warning and/or --min-critical. Use with --filter
-                              to alert on presence of critical log messages.
-
-Credentials:
-  --netrc FILE                Path to .netrc file (default: ~/.netrc, then /etc/nagios/netrc)
+options:
+  -h, --help            show this help message and exit
+  -i, --index INDEX     OpenSearch index name or pattern (e.g., logs-*, filebeat-2024)
+  -w, --warning WARNING
+                        Maximum age warning threshold in seconds (default: 3600 = 1 hour). Alert
+                        if documents are OLDER than this.
+  -c, --critical CRITICAL
+                        Maximum age critical threshold in seconds (default: 7200 = 2 hours). Alert
+                        if documents are OLDER than this.
+  --min-warning MIN_WARNING
+                        Minimum age warning threshold in seconds. Alert if documents are NEWER
+                        than this (excessive activity).
+  --min-critical MIN_CRITICAL
+                        Minimum age critical threshold in seconds. Alert if documents are NEWER
+                        than this (excessive activity).
+  -t, --timestamp-field TIMESTAMP_FIELD
+                        Timestamp field name (default: @timestamp)
+  -H, --host HOST       OpenSearch host URL (default: https://localhost:9200)
+  -k, --insecure        Skip SSL certificate verification
+  -v, --verbose         Verbose output for debugging
+  --ca-file CA_FILE     CA certificate bundle (PEM) to verify the server certificate against
+  -V, --version         show program's version number and exit
+  --count COUNT         Number of recent documents to check (default: 1). Fetches this many recent
+                        documents and checks that the oldest is within thresholds.
+  --filter FILTER       JSON filter query to apply (e.g., '{"term": {"field.keyword": "value"}}').
+                        Will be wrapped in a bool filter. Multiple filters can be combined in a
+                        JSON array.
+  --netrc NETRC         Path to .netrc file for credentials (default: ~/.netrc, then
+                        /etc/nagios/netrc)
+  --reverse             Reverse logic: OK when no documents found, CRITICAL when documents found.
+                        Ignores max age (--warning, --critical). Requires --min-warning and/or
+                        --min-critical. Use with --filter to alert on presence of critical log
+                        messages.
 ```
 
 
@@ -263,11 +271,11 @@ Use `--reverse` to alert when specific messages ARE found.  This is useful for a
 
 ```
 OK: Index 'logs-2024' has activity from 5m 23s ago | age=323s;3600;7200;0;
-OK: 5 documents, newest: 3s, oldest: 45s | age=3s;60;300;0; oldest_age=45s;60;300;0;
+OK: 5 documents, newest: 3s, oldest: 45s | age=3s;;;0; oldest_age=45s;60;300;0;
 
-WARNING: Insufficient activity - oldest of 5 documents is 1m 25s old (maximum threshold: 1m 0s) | age=5s;60;300;0; oldest_age=85s;60;300;0;
+WARNING: Insufficient activity - oldest of 5 documents is 1m 25s old (maximum threshold: 1m 0s) | age=5s;;;0; oldest_age=85s;60;300;0;
 
-CRITICAL: Insufficient activity - oldest of 10 documents is 6m 40s old (maximum threshold: 5m 0s) | age=12s;120;300;0; oldest_age=400s;120;300;0;
+CRITICAL: Insufficient activity - oldest of 10 documents is 6m 40s old (maximum threshold: 5m 0s) | age=12s;;;0; oldest_age=400s;120;300;0;
 CRITICAL: No documents found in index 'nonexistent-index'
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
 
@@ -276,7 +284,9 @@ UNKNOWN: --count must be >= 1
 
 **Exit codes:** 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
 
-**Performance data format:** `age=323s;warning;critical;min;` (suitable for graphing with PNP4Nagios, Grafana, etc.)
+**Performance data format:** `age=323s;warning;critical;0;` (suitable for graphing with PNP4Nagios, Grafana, etc.)
+
+The thresholds are attached to the value they are checked against.  With `--count` > 1 that is `oldest_age`, and `age` (the newest document) carries none.  Minimum-age thresholds are written as Nagios ranges: `min-warning:warning` in normal mode, `min-warning:` in reverse mode.
 
 ## Nagios/NRPE Configuration
 
@@ -304,7 +314,7 @@ command[check_opensearch_errors]=/usr/lib/nagios/plugins/check_opensearch_index.
 command[check_opensearch_critical]=/usr/lib/nagios/plugins/check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' --min-warning 600 --reverse --netrc /etc/nagios/credentials/opensearch.netrc
 ```
 
-**Note:** The `--netrc` parameter is essential when running as the `nagios`/`nrpe` user, as these system users typically don't have a proper home directory.
+**Note:** The `nagios`/`nrpe` system users typically don't have a proper home directory, so the plugin falls back to `/etc/nagios/netrc`.  `--netrc` is only needed for credentials stored elsewhere, as in the examples above.
 
 ### Nagios Service Definition
 
@@ -352,8 +362,8 @@ define service {
 |-------|----------|
 | `No documents found in index 'myindex'` | Check index exists: `curl -k --netrc https://localhost:9200/_cat/indices?v` |
 | `Timestamp field '@timestamp' not found` | Check mapping: `curl -k --netrc https://localhost:9200/myindex/_mapping`<br>Use `-t timestamp` for Vector logs |
-| `HTTP 401 Unauthorized` | Verify `.netrc` has correct credentials and `600` permissions |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | Use `-k` flag for self-signed certs |
+| `HTTP 401 Unauthorized` | Verify the netrc file has correct credentials and is readable by the plugin's user (`-v` shows which file was used) |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | Use `--ca-file` with the CA certificate that signed the server certificate, or `-k` to skip verification |
 | `Connection refused` | Check OpenSearch is running: `systemctl status opensearch` |
 
 ## Testing
@@ -375,7 +385,7 @@ curl -k --netrc -X POST https://localhost:9200/test-index/_doc -H 'Content-Type:
 
 ## Security & Support
 
-**Security:** Use read-only monitoring user, keep `.netrc` at `600` permissions, avoid `-k` in production.
+**Security:** Use a read-only monitoring user, keep the netrc file unreadable for others, and prefer `--ca-file` over `-k` in production.
 
 **Issues:** Check with `-v` flag first, then report at https://github.com/tobixen/check-opensearch-index/issues
 

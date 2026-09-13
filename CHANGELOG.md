@@ -56,7 +56,7 @@ Quite much of the changelog was AI-generated
   (e.g. `-w 60 -c 600 --min-critical 100`)
 - Timestamps are read from the sort value instead of being parsed from the document, which fixes
   dotted field names (`-t event.created`), epoch-millis values, timestamps without a timezone
-  and `date_nanos` fields
+  and `date_nanos` fields.  Elasticsearch has to be 7.2 or newer; any OpenSearch version works
 - Index patterns where some indices lack the timestamp field no longer fail with HTTP 400
 - Performance data attaches thresholds to the value they are checked against (`oldest_age` when
   `--count` > 1), includes the `--min-*` thresholds as Nagios ranges
@@ -88,17 +88,14 @@ Quite much of the changelog was AI-generated
   - The old name was confusing and sounded like a minimum threshold
   - New name clearly indicates "number of documents to check"
   - Update your scripts: `--min-unique 5` → `--count 5`
+- Optimized timestamp parsing to only parse first and last document
+  - Significant performance improvement for large `--count` values
 
 ### Removed
 
 - Removed unnecessary unique document ID validation
   - OpenSearch already guarantees unique results by document ID
   - Simplified code and reduced unnecessary checks
-
-### Fixed
-
-- Optimized timestamp parsing to only parse first and last document
-  - Significant performance improvement for large `--count` values
 
 ### Added
 
@@ -115,5 +112,5 @@ Basic features:
 
 * Can give alerts if the recent activity in an OpenSearch index is old.
 * Instead of checking the most recent document, it may be configured to look i.e. 100 documents behind and check the age of that document.  This will give a more stable monitoring, may prevent flapping state, useful to monitor that there is a minimum volume of logs coming in.
-* It may monitor both max and min age of "document number 100".  The minimum age is useful for detecting log flooding.  Flooding log messages typically indicates that something is wrong, and may eat up avaailable disk space very fast.
+* It may monitor both max and min age of "document number 100".  The minimum age is useful for detecting log flooding.  Flooding log messages typically indicates that something is wrong, and may eat up available disk space very fast.
 * In my case, I have an index that is populated by multiple sources, and I need to monitor that one particular source is contributing with a steady stream of logs.  The script accepts a --filter parameter for this.

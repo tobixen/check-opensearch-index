@@ -9,7 +9,7 @@
   --filter '{"range": {"http_status": {"gte": 500, "lt": 600}}}'
 
 # HTTP status >= 500
-./check_opensearch_index.py -i logs-* --reverse \'
+./check_opensearch_index.py -i logs-* --reverse \
   --count 100 --min-warning=1800 --min-critical=900 \
   --filter '{"range": {"http_status": {"gte": 500}}}'
 
@@ -69,7 +69,9 @@
 ## Wildcard and Regex
 
 ```bash
-# Message contains "error" or "fatal" (case insensitive)
+# Message contains "error" or "fatal".  Whether this is case insensitive depends on
+# the analyzer of the field (the standard analyzer lowercases).  Leading wildcards
+# like *error* have to scan every term and are slow on large indices.
 ./check_opensearch_index.py -i logs-* --reverse \
    --count 100 --min-warning=1800 --min-critical=900 \
   --filter '{"query_string": {"query": "message:(*error* OR *fatal*)", "default_operator": "AND"}}'
