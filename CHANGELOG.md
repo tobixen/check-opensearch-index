@@ -27,6 +27,9 @@ Quite much of the changelog was AI-generated
     - System failures (out of memory, disk full, database down)
     - Deployment failures or rollback events
 
+- `--ca-file` to verify the server certificate against a private CA instead of using `-k`
+- `-V`/`--version`
+
 - Secondary default netrc location: `/etc/nagios/netrc`
   - Script now automatically tries `~/.netrc` first, then `/etc/nagios/netrc` as fallback
   - No need to specify `--netrc` parameter when using `/etc/nagios/netrc`
@@ -55,6 +58,11 @@ Quite much of the changelog was AI-generated
   dotted field names (`-t event.created`), epoch-millis values, timestamps without a timezone
   and `date_nanos` fields
 - Index patterns where some indices lack the timestamp field no longer fail with HTTP 400
+- Performance data attaches thresholds to the value they are checked against (`oldest_age` when
+  `--count` > 1), includes the `--min-*` thresholds as Nagios ranges
+- A trailing slash on `-H` and special characters in `-i` (date math) no longer break the URL
+- A timeout while reading the response gives CRITICAL, like a connect timeout
+- An unreadable netrc file gives a clear UNKNOWN message
 
 ## [0.3.0] - [2025-11-20]
 

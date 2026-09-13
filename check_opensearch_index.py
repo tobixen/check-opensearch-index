@@ -14,7 +14,6 @@ Exit codes:
 Author: Claude / Tobias Brox
 License: MIT
 Project home: https://github.com/tobixen/check-opensearch-index
-Version: v0.4.0-dev0 (Will someone remember to keep this one up-to-date?)
 """
 
 import argparse
@@ -26,8 +25,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
+
+__version__ = "0.4.0.dev0"
+
+SYSTEM_NETRC = '/etc/nagios/netrc'
 
 # Nagios plugin exit codes
 STATE_OK = 0
@@ -142,6 +145,17 @@ Examples:
     )
 
     parser.add_argument(
+        '--ca-file',
+        help='CA certificate bundle (PEM) to verify the server certificate against'
+    )
+
+    parser.add_argument(
+        '-V', '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
+
+    parser.add_argument(
         '--count',
         type=int,
         default=1,
@@ -210,6 +224,9 @@ def validate_args(args):
     if args.count < 1:
         raise CheckError(STATE_UNKNOWN, "--count must be >= 1")
 
+    if args.insecure and args.ca_file:
+        raise CheckError(STATE_UNKNOWN, "--insecure and --ca-file are mutually exclusive")
+
 
 def parse_filter(filter_json):
     """Parse the --filter JSON, or return None if no filter was given."""
@@ -230,7 +247,7 @@ def get_credentials(host, netrc_file=None):
         netrc_file: Optional path to .netrc file (default: ~/.netrc, then /etc/nagios/netrc)
 
     Returns:
-        tuple: (username, password) or (None, None) if not found
+        tuple: (username, password, netrc_path) or (None, None, None) if not found
     """
     # Determine which netrc file to use
     if netrc_file:
@@ -239,7 +256,7 @@ def get_credentials(host, netrc_file=None):
         # Try ~/.netrc first, then /etc/nagios/netrc as fallback
         netrc_paths = [
             str(Path.home() / '.netrc'),
-            '/etc/nagios/netrc'
+            SYSTEM_NETRC
         ]
 
     hostname = urlparse(host).hostname or 'localhost'
@@ -250,29 +267,33 @@ def get_credentials(host, netrc_file=None):
             auth = nrc.authenticators(hostname)
 
             if auth:
-                return auth[0], auth[2]  # username, password
+                return auth[0], auth[2], netrc_path  # username, password, source
         except FileNotFoundError:
             # Try next path
             continue
+        except PermissionError as e:
+            raise CheckError(STATE_UNKNOWN, f"Cannot read netrc file {netrc_path}: {e.strerror}") from e
         except netrc.NetrcParseError as e:
             raise CheckError(STATE_UNKNOWN, f"Error parsing netrc file {netrc_path}: {e}") from e
 
     # No credentials found in any file
-    return None, None
+    return None, None, None
 
 
-def query_latest_documents(host, index, timestamp_field, username, password, size=1, filter_query=None, insecure=False, verbose=False):
+def query_latest_documents(host, index, timestamp_field, username, password, size=1, filter_query=None, context=None, verbose=False):
     """
     Query OpenSearch for the most recent documents in the index.
 
     Args:
         size: Number of documents to retrieve (default: 1)
         filter_query: Optional dict or list of dicts for filtering documents
+        context: Optional ssl.SSLContext for the connection
 
     Returns:
         list: List of documents with timestamps, or empty list if no documents found
     """
-    url = f"{host}/{index}/_search"
+    # Index names may hold date math (<logs-{now/d}>), which must be URL-encoded
+    url = f"{host.rstrip('/')}/{quote(index, safe='*,')}/_search"
 
     # Query to get the most recent documents based on timestamp.  The age is
     # read from the sort value (epoch millis), so _source is not needed.
@@ -317,11 +338,6 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
             method='POST'
         )
 
-        # Handle SSL verification
-        context = None
-        if insecure:
-            context = ssl._create_unverified_context()
-
         with urlopen(request, context=context, timeout=30) as response:
             result = json.loads(response.read().decode('utf-8'))
 
@@ -335,8 +351,26 @@ def query_latest_documents(host, index, timestamp_field, username, password, siz
         raise CheckError(STATE_CRITICAL, f"HTTP {e.code} error querying OpenSearch: {error_body}") from e
     except URLError as e:
         raise CheckError(STATE_CRITICAL, f"Connection error: {e.reason}") from e
+    except OSError as e:
+        # e.g. a socket timeout while reading the response
+        raise CheckError(STATE_CRITICAL, f"Connection error: {e}") from e
     except json.JSONDecodeError as e:
         raise CheckError(STATE_CRITICAL, f"Invalid JSON response: {e}") from e
+
+
+def ssl_context(args):
+    """SSL context for the connection: default verification, a private CA, or none at all."""
+    if args.insecure:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    if args.ca_file:
+        try:
+            return ssl.create_default_context(cafile=args.ca_file)
+        except OSError as e:
+            raise CheckError(STATE_UNKNOWN, f"Cannot load --ca-file {args.ca_file}: {e}") from e
+    return None
 
 
 def document_age(hit, now):
@@ -369,18 +403,29 @@ def format_duration(seconds):
 
 
 def perfdata(args, newest_age, oldest_age, found):
-    """Nagios performance data for the check result."""
-    if args.reverse:
-        data = f"age={oldest_age}s;;;0;"
-        if args.count > 1:
-            data += f" count={found};;;0;"
-        return data
+    """
+    Nagios performance data for the check result.
 
-    thresholds = f"{args.warning};{args.critical};0;"
-    data = f"age={newest_age}s;{thresholds}"
-    if args.count > 1:
-        data += f" oldest_age={oldest_age}s;{thresholds}"
-    return data
+    Thresholds are attached to the value they are checked against: the oldest
+    of the --count newest documents.  A min threshold becomes the lower bound
+    of a Nagios range ("min:max", or "min:" in reverse mode).
+    """
+    def threshold(min_age, max_age):
+        if min_age is None:
+            return "" if max_age is None else f"{max_age}"
+        return f"{min_age}:" if max_age is None else f"{min_age}:{max_age}"
+
+    if args.reverse:
+        checked = f"{threshold(args.min_warning, None)};{threshold(args.min_critical, None)};0;"
+    else:
+        checked = (f"{threshold(args.min_warning, args.warning)};"
+                   f"{threshold(args.min_critical, args.critical)};0;")
+
+    if args.count == 1:
+        return f"age={oldest_age}s;{checked}"
+    if args.reverse:
+        return f"age={oldest_age}s;{checked} count={found};;;0;"
+    return f"age={newest_age}s;;;0; oldest_age={oldest_age}s;{checked}"
 
 
 def check(args):
@@ -388,12 +433,14 @@ def check(args):
     validate_args(args)
     filter_query = parse_filter(args.filter)
 
-    username, password = get_credentials(args.host, args.netrc)
+    username, password, netrc_path = get_credentials(args.host, args.netrc)
+    context = ssl_context(args)
 
     if args.verbose:
-        cred_status = "found" if username else "not found"
-        netrc_location = args.netrc if args.netrc else "~/.netrc"
-        print(f"DEBUG: Credentials {cred_status} in {netrc_location}", file=sys.stderr)
+        if netrc_path:
+            print(f"DEBUG: Credentials found in {netrc_path}", file=sys.stderr)
+        else:
+            print("DEBUG: No credentials found in any netrc file", file=sys.stderr)
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
         if args.count > 1:
             print(f"DEBUG: Fetching {args.count} documents, all must be within thresholds", file=sys.stderr)
@@ -409,7 +456,7 @@ def check(args):
         password,
         args.count,
         filter_query,
-        args.insecure,
+        context,
         args.verbose
     )
 

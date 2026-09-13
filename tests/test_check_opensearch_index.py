@@ -1,5 +1,6 @@
 import io
 import json
+import ssl
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -22,19 +23,24 @@ def make_hit(age):
     return {"_id": str(age), "sort": [int(ts.timestamp() * 1000)]}
 
 
-def run(monkeypatch, capsys, argv, ages=(), hits=None, requests=None):
-    """Run the plugin against a fake OpenSearch; return (exit code, stdout)."""
+def run(monkeypatch, capsys, argv, ages=(), hits=None, requests=None, response=io.BytesIO):
+    """Run the plugin against a fake OpenSearch; return (exit code, stdout).
+
+    Requests made are appended to `requests`, with the urlopen() keyword
+    arguments as `request.urlopen_kwargs`.
+    """
     if hits is None:
         hits = [make_hit(age) for age in ages]
 
     def fake_urlopen(request, **kwargs):
+        request.urlopen_kwargs = kwargs
         if requests is not None:
             requests.append(request)
         size = json.loads(request.data)["size"]
-        return io.BytesIO(json.dumps({"hits": {"hits": hits[:size]}}).encode())
+        return response(json.dumps({"hits": {"hits": hits[:size]}}).encode())
 
     monkeypatch.setattr(plugin, "urlopen", fake_urlopen)
-    monkeypatch.setattr(plugin, "get_credentials", lambda *a, **k: (None, None))
+    monkeypatch.setattr(plugin, "get_credentials", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(sys, "argv", ["check_opensearch_index.py", "-i", "idx", *argv])
     with pytest.raises(SystemExit) as exc:
         plugin.main()
@@ -99,6 +105,7 @@ def test_reverse_mode_thresholds(monkeypatch, capsys, argv, ages, expected):
         ["--reverse", "--min-critical", "-1"],
         ["--reverse", "--min-critical", "100", "--min-warning", "50"],
         ["--filter", "{not json"],
+        ["-k", "--ca-file", "ca.pem"],
     ],
 )
 def test_invalid_arguments(monkeypatch, capsys, argv):
@@ -142,3 +149,106 @@ def test_hits_out_of_order(monkeypatch, capsys):
 def test_valid_min_critical_below_warning(monkeypatch, capsys):
     code, out = run(monkeypatch, capsys, ["-w", "600", "-c", "1200", "--min-critical", "100"], [300])
     assert code == OK, out
+
+
+@pytest.mark.parametrize(
+    "argv, ages, expected",
+    [
+        (["-w", "100", "-c", "1000"], [10], "age=10s;100;1000;0;"),
+        # thresholds go on the series they are applied to
+        (["-w", "100", "-c", "1000", "--count", "3"], [1, 2, 50], "age=1s;;;0; oldest_age=50s;100;1000;0;"),
+        (["-w", "100", "-c", "1000", "--min-warning", "50", "--min-critical", "20"], [70],
+         "age=70s;50:100;20:1000;0;"),
+        (["--reverse", "--min-critical", "60", "--min-warning", "600"], [5], "age=5s;600:;60:;0;"),
+        (["--reverse", "--min-critical", "60", "--count", "2"], [5, 6], "age=6s;;60:;0; count=2;;;0;"),
+    ],
+)
+def test_perfdata(monkeypatch, capsys, argv, ages, expected):
+    code, out = run(monkeypatch, capsys, argv, ages)
+    assert out.rstrip("\n").split(" | ", 1)[1] == expected
+
+
+def test_url_is_quoted_and_trailing_slash_dropped(monkeypatch, capsys):
+    requests = []
+    run(monkeypatch, capsys, ["-H", "https://os.example:9200/", "-i", "<logs-{now/d}>,other-*"], [1],
+        requests=requests)
+    assert requests[0].full_url == "https://os.example:9200/%3Clogs-%7Bnow%2Fd%7D%3E,other-*/_search"
+
+
+def test_read_timeout_is_critical(monkeypatch, capsys):
+    class TimingOut(io.BytesIO):
+        def read(self, *args):
+            raise TimeoutError("The read operation timed out")
+
+    code, out = run(monkeypatch, capsys, [], [1], response=TimingOut)
+    assert code == CRITICAL, out
+    assert "timed out" in out
+
+
+def test_insecure_disables_verification(monkeypatch, capsys):
+    requests = []
+    run(monkeypatch, capsys, ["-k"], [1], requests=requests)
+    context = requests[0].urlopen_kwargs["context"]
+    assert context.verify_mode == ssl.CERT_NONE
+    assert not context.check_hostname
+
+
+def test_ca_file_is_loaded(monkeypatch, capsys):
+    cafiles = []
+    real_create_default_context = ssl.create_default_context
+
+    def fake_create_default_context(*args, cafile=None, **kwargs):
+        cafiles.append(cafile)
+        return real_create_default_context()
+
+    monkeypatch.setattr(plugin.ssl, "create_default_context", fake_create_default_context)
+    code, out = run(monkeypatch, capsys, ["--ca-file", "/etc/ssl/private-ca.pem"], [1])
+    assert code == OK, out
+    assert cafiles == ["/etc/ssl/private-ca.pem"]
+
+
+def test_ca_file_missing(monkeypatch, capsys, tmp_path):
+    code, out = run(monkeypatch, capsys, ["--ca-file", str(tmp_path / "missing.pem")], [1])
+    assert code == UNKNOWN, out
+
+
+def test_version(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["check_opensearch_index.py", "-V"])
+    with pytest.raises(SystemExit) as exc:
+        plugin.parse_args()
+    assert exc.value.code == 0
+    assert plugin.__version__ in capsys.readouterr().out
+
+
+def write_netrc(tmp_path):
+    path = tmp_path / "netrc"
+    path.write_text("machine localhost\n  login monitoring\n  password secret\n")
+    return str(path)
+
+
+def test_get_credentials_reports_source(tmp_path):
+    path = write_netrc(tmp_path)
+    assert plugin.get_credentials("https://localhost:9200", path) == ("monitoring", "secret", path)
+
+
+def test_get_credentials_falls_back_to_system_netrc(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin.Path, "home", lambda: tmp_path / "nohome")
+    path = write_netrc(tmp_path)
+    monkeypatch.setattr(plugin, "SYSTEM_NETRC", path)
+    assert plugin.get_credentials("https://localhost:9200") == ("monitoring", "secret", path)
+
+
+def test_get_credentials_not_found(tmp_path):
+    path = write_netrc(tmp_path)
+    assert plugin.get_credentials("https://elsewhere:9200", path) == (None, None, None)
+
+
+def test_get_credentials_unreadable(tmp_path, monkeypatch):
+    def deny(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(plugin.netrc, "netrc", deny)
+    with pytest.raises(plugin.CheckError) as exc:
+        plugin.get_credentials("https://localhost:9200", str(tmp_path / "netrc"))
+    assert exc.value.state == UNKNOWN
+    assert "Permission denied" in exc.value.message
