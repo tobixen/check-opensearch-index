@@ -8,9 +8,9 @@ Nagios/NRPE plugin to monitor OpenSearch/Elasticsearch index activity by checkin
 - ✅ Monitors for excessive activity (documents too new - detects runaway processes, attacks)
 - ✅ Anti-flapping: Look at the Nth newest document rather than the newest
 - ✅ Flexible filtering: JSON query support to monitor specific document subsets
-- ✅ Reverse mode with filtering: alert on presence of critical messages (errors, security events)
+- ✅ Alert on the presence of unwanted documents (errors, security events) with a filter and a minimum age
 - ✅ Supports index patterns (e.g., `logs-*`, `filebeat-2024-*`)
-- ✅ Configurable warning and critical thresholds (both minimum and maximum age)
+- ✅ Warning and critical thresholds in the Nagios range format (minimum and/or maximum age)
 - ✅ Reads credentials from `~/.netrc` or `/etc/nagios/netrc` (secure)
 - ✅ Performance data output for graphing
 - ✅ SSL support, with a private CA (`--ca-file`) or optionally without verification
@@ -122,31 +122,45 @@ The netrc-file may contain several machine sections separated by a blank line, i
 
 ## Usage
 
+### Thresholds
+
+`-w` and `-c` take [Nagios threshold ranges](https://www.monitoring-plugins.org/doc/guidelines.html#THRESHOLDFORMAT), applied to the age in seconds of the oldest of the `--count` newest documents:
+
+| Range   | Alerts when the age is | Typical use |
+|---------|------------------------|-------------|
+| `N`     | above N                | too little activity |
+| `N:`    | below N                | too much activity, or unwanted documents found |
+| `M:N`   | below M or above N     | both |
+| `~:N`   | above N                | same as `N` |
+| `@M:N`  | between M and N        | rarely useful |
+
+If fewer than `--count` documents are found, the age counts as infinite: CRITICAL for `-c 7200`, OK for `-c 300:`.
+
+Without any threshold option, `-w 3600 -c 7200` is used.  If any threshold is given, the others have no default.
+
+`--min-warning N` and `--min-critical N` are an older way to set the lower bound: `--min-warning 30 -w 180` is the same as `-w 30:180`.
+
 ### Options
 
 ```
-usage: check_opensearch_index.py [-h] -i INDEX [-w WARNING] [-c CRITICAL]
-                                 [--min-warning MIN_WARNING] [--min-critical MIN_CRITICAL]
-                                 [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v] [--ca-file CA_FILE] [-V]
-                                 [--count COUNT] [--filter FILTER] [--netrc NETRC] [--reverse]
+usage: check_opensearch_index.py [-h] -i INDEX [-w RANGE] [-c RANGE] [--min-warning SECONDS]
+                                 [--min-critical SECONDS] [-t TIMESTAMP_FIELD] [-H HOST] [-k] [-v]
+                                 [--ca-file CA_FILE] [-V] [--count COUNT] [--filter FILTER]
+                                 [--netrc NETRC]
 
 Check OpenSearch index activity
 
 options:
   -h, --help            show this help message and exit
   -i, --index INDEX     OpenSearch index name or pattern (e.g., logs-*, filebeat-2024)
-  -w, --warning WARNING
-                        Maximum age warning threshold in seconds (default: 3600 = 1 hour). Alert
-                        if documents are OLDER than this.
-  -c, --critical CRITICAL
-                        Maximum age critical threshold in seconds (default: 7200 = 2 hours). Alert
-                        if documents are OLDER than this.
-  --min-warning MIN_WARNING
-                        Minimum age warning threshold in seconds. Alert if documents are NEWER
-                        than this (excessive activity).
-  --min-critical MIN_CRITICAL
-                        Minimum age critical threshold in seconds. Alert if documents are NEWER
-                        than this (excessive activity).
+  -w, --warning RANGE   Warning threshold for the age in seconds, as a Nagios range (see below). N
+                        alerts on ages above N, N: on ages below N.
+  -c, --critical RANGE  Critical threshold for the age in seconds, as a Nagios range (see below).
+  --min-warning SECONDS
+                        Lower bound of the warning range: --min-warning 30 -w 180 is the same as
+                        -w 30:180.
+  --min-critical SECONDS
+                        Lower bound of the critical range.
   -t, --timestamp-field TIMESTAMP_FIELD
                         Timestamp field name (default: @timestamp)
   -H, --host HOST       OpenSearch host URL (default: https://localhost:9200)
@@ -161,11 +175,9 @@ options:
                         JSON array.
   --netrc NETRC         Path to .netrc file for credentials (default: ~/.netrc, then
                         /etc/nagios/netrc)
-  --reverse             Reverse logic: OK when no documents found, CRITICAL when documents found.
-                        Ignores max age (--warning, --critical). Requires --min-warning and/or
-                        --min-critical. Use with --filter to alert on presence of critical log
-                        messages.
 ```
+
+`--help` also prints the threshold table and examples.
 
 
 ## Examples
@@ -200,12 +212,12 @@ To reduce the "jitter" in the monitoring, as well as being able to give alarms i
 
 ### Excessive Activity Detection
 
-Too much activity is often bad - it may be an indication that something is seriously wrong, and it may eat up all available disk space.  You may monitor for TOO MUCH activity using `--min-warning`/`--min-critical`:
+Too much activity is often bad - it may be an indication that something is seriously wrong, and it may eat up all available disk space.  You may monitor for TOO MUCH activity by giving the threshold a lower bound:
 
 ```bash
 # The "my-logs" index is supposed to have around 100 documents pr minute.  
 # Alert if it takes more than 10m or less than 10s to produce 100 documents.
-./check_opensearch_index.py -i my-logs-* --count 100 --min-critical 10 --min-warning 30 -w 180 -c 600
+./check_opensearch_index.py -i my-logs-* --count 100 -w 30:180 -c 10:600
 ```
 
 ### Filtering Documents
@@ -231,9 +243,9 @@ Monitor specific subsets with `--filter` (JSON Elasticsearch query):
 
 **Filter notes:** Text fields need `.keyword` suffix for exact match. Numeric fields don't. Check mapping: `curl -k --netrc https://localhost:9200/index/_mapping`
 
-### Reverse Mode: Alert on Presence
+### Alerting on Unwanted Documents
 
-Use `--reverse` to alert when specific messages ARE found.  This is useful for alarming about:
+Combine `--filter` with a lower-bound threshold (`N:`) to alert when specific messages ARE found.  This is useful for alarming about:
 
 * Log messages failing to be parsed correctly 
 * A web server delivers too many 500 internal server errors
@@ -242,40 +254,39 @@ Use `--reverse` to alert when specific messages ARE found.  This is useful for a
 
 ```bash
 # Error logs index should have few hits; warn if 10 errors in < 5 minutes
-./check_opensearch_index.py -i error-logs-* --count 10 --min-warning 300 --reverse
+./check_opensearch_index.py -i error-logs-* --count 10 -w 300:
 
 # Detect DoS: 100 HTTP errors in < 60 seconds is critical
-./check_opensearch_index.py -i nginx-* --count 100 --min-critical 60 --reverse \
+./check_opensearch_index.py -i nginx-* --count 100 -c 60: \
   --filter '{"range": {"status": {"gte": 400}}}'
 
+# 100 HTTP 5xx errors in < 30 minutes is a warning, in < 5 minutes critical
+./check_opensearch_index.py -i haproxy-* --count 100 -w 1800: -c 300: \
+  --filter '{"range": {"http_code": {"gte": 500}}}'
+
 # Alert if ERROR logs found in last 5 minutes
-./check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' \
-  --min-critical 300 --reverse
+./check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' -c 300:
 
 # Warn if FATAL/CRITICAL messages in last 10 minutes
-./check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' \
-  --min-warning 600 --reverse
+./check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' -w 600:
 
 # Security monitoring: alert on unauthorized access
-./check_opensearch_index.py -i security-* --filter '{"term": {"event.keyword": "unauthorized_access"}}' \
-  --min-critical 3600 --reverse
+./check_opensearch_index.py -i security-* --filter '{"term": {"event.keyword": "unauthorized_access"}}' -c 3600:
 ```
 
-**Reverse mode behavior:**
-* Returns OK if no (or fewer than `--count`) documents found
-* Returns CRITICAL/WARNING if documents found newer than `--min-critical`/`--min-warning`
-* Requires `--min-warning` and/or `--min-critical` (mandatory in reverse mode)
-* Ignores `-w`/`-c` max age thresholds (don't use them in reverse mode)
+**How it works:** `-c 300:` alerts when the oldest of the `--count` newest matching documents is younger than 300 seconds.  If fewer than `--count` documents match, the age counts as infinite, which is OK.  Don't add an upper bound (`-c 300:7200`) to such a check: then finding no errors becomes CRITICAL.
 
 ## Output Examples
 
 ```
 OK: Index 'logs-2024' has activity from 5m 23s ago | age=323s;3600;7200;0;
 OK: 5 documents, newest: 3s, oldest: 45s | age=3s;;;0; oldest_age=45s;60;300;0;
+OK: No documents found matching filter in index 'haproxy-*'
 
-WARNING: Insufficient activity - oldest of 5 documents is 1m 25s old (maximum threshold: 1m 0s) | age=5s;;;0; oldest_age=85s;60;300;0;
+WARNING: Insufficient activity - oldest of the 5 newest documents is 1m 25s old (maximum threshold: 1m 0s) | age=5s;;;0; oldest_age=85s;60;300;0;
 
-CRITICAL: Insufficient activity - oldest of 10 documents is 6m 40s old (maximum threshold: 5m 0s) | age=12s;;;0; oldest_age=400s;120;300;0;
+CRITICAL: Insufficient activity - oldest of the 10 newest documents is 6m 40s old (maximum threshold: 5m 0s) | age=12s;;;0; oldest_age=400s;120;300;0;
+CRITICAL: Excessive activity - oldest of the 100 newest documents matching filter is only 3m 12s old (minimum threshold: 5m 0s) | age=2s;;;0; oldest_age=192s;1800:;300:;0;
 CRITICAL: No documents found in index 'nonexistent-index'
 CRITICAL: HTTP 401 error querying OpenSearch: Unauthorized
 
@@ -286,7 +297,7 @@ UNKNOWN: --count must be >= 1
 
 **Performance data format:** `age=323s;warning;critical;0;` (suitable for graphing with PNP4Nagios, Grafana, etc.)
 
-The thresholds are attached to the value they are checked against.  With `--count` > 1 that is `oldest_age`, and `age` (the newest document) carries none.  Minimum-age thresholds are written as Nagios ranges: `min-warning:warning` in normal mode, `min-warning:` in reverse mode.
+The thresholds are attached to the value they are checked against.  With `--count` > 1 that is `oldest_age`, and `age` (the newest document) carries none.  They use the same Nagios range format as `-w`/`-c`.
 
 ## Nagios/NRPE Configuration
 
@@ -307,11 +318,11 @@ command[check_opensearch_metrics]=/usr/lib/nagios/plugins/check_opensearch_index
 # High-frequency index with anti-flapping (check 5 docs, oldest within 30s)
 command[check_opensearch_realtime]=/usr/lib/nagios/plugins/check_opensearch_index.py -i realtime-* -w 30 -c 120 --count 5 --netrc /etc/nagios/credentials/opensearch.netrc
 
-# Reverse mode: Alert if ERROR logs found in last 5 minutes
-command[check_opensearch_errors]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' --min-critical 300 --reverse --netrc /etc/nagios/credentials/opensearch.netrc
+# Unwanted documents: Alert if ERROR logs found in last 5 minutes
+command[check_opensearch_errors]=/usr/lib/nagios/plugins/check_opensearch_index.py -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' -c 300: --netrc /etc/nagios/credentials/opensearch.netrc
 
-# Reverse mode: Alert if FATAL/CRITICAL messages found in last 10 minutes
-command[check_opensearch_critical]=/usr/lib/nagios/plugins/check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' --min-warning 600 --reverse --netrc /etc/nagios/credentials/opensearch.netrc
+# Unwanted documents: Alert if FATAL/CRITICAL messages found in last 10 minutes
+command[check_opensearch_critical]=/usr/lib/nagios/plugins/check_opensearch_index.py -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' -w 600: --netrc /etc/nagios/credentials/opensearch.netrc
 ```
 
 **Note:** The `nagios`/`nrpe` system users typically don't have a proper home directory, so the plugin falls back to `/etc/nagios/netrc`.  `--netrc` is only needed for credentials stored elsewhere, as in the examples above.

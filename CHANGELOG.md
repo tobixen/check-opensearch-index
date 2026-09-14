@@ -14,18 +14,9 @@ Quite much of the changelog was AI-generated
 
 ### Added
 
-- New `--reverse` mode for alert-on-presence monitoring
-  - Inverts check logic: returns OK when no documents found, CRITICAL when documents ARE found
-  - Designed for monitoring critical errors, security events, and exceptional conditions
-  - Ignores max age thresholds (--warning, --critical) in reverse mode
-  - Requires `--min-warning` and/or `--min-critical` to be specified (mandatory in reverse mode)
-  - Example use case: Alert CRITICAL if ERROR logs found in last 5 minutes
-  - Combines with `--filter` to search for specific message patterns
-  - Typical applications:
-    - Critical application errors that should never happen
-    - Security violations (unauthorized access, failed authentication)
-    - System failures (out of memory, disk full, database down)
-    - Deployment failures or rollback events
+- Thresholds (`-w`/`-c`) accept the Nagios range format, e.g. `-c 300:` to alert when a document
+  newer than 5 minutes is found.  Combined with `--filter`, this alerts on the presence of errors,
+  security events and other unwanted documents.  `--min-warning`/`--min-critical` still work
 
 - `--ca-file` to verify the server certificate against a private CA instead of using `-k`
 - `-V`/`--version`
@@ -37,11 +28,10 @@ Quite much of the changelog was AI-generated
 
 ### Changed
 
-- Updated help text with reverse mode examples and requirements
-- Enhanced README with comprehensive reverse mode documentation
-  - New "Reverse Mode" section with use cases and examples
-  - Updated Features list to highlight reverse mode capability
-  - Added NRPE configuration examples for reverse mode monitoring
+- **BREAKING**: when any threshold option is given, the others no longer default to 3600/7200.
+  `-w 300` alone used to imply `-c 7200`
+- An age exactly at a maximum threshold is now OK, as the Nagios range format defines it
+- Updated help text and README with threshold range examples
   - Simplified credentials setup documentation
   - Consolidated overlapping content between Usage and Examples sections (31% reduction in length)
 

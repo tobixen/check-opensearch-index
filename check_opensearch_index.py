@@ -19,6 +19,7 @@ Project home: https://github.com/tobixen/check-opensearch-index
 import argparse
 import base64
 import json
+import math
 import netrc
 import ssl
 import sys
@@ -31,6 +32,12 @@ from urllib.request import Request, urlopen
 __version__ = "0.4.0.dev0"
 
 SYSTEM_NETRC = '/etc/nagios/netrc'
+
+INF = float('inf')
+
+# Used only when no threshold option at all is given
+DEFAULT_WARNING = 3600
+DEFAULT_CRITICAL = 7200
 
 # Nagios plugin exit codes
 STATE_OK = 0
@@ -58,6 +65,58 @@ class CheckError(Exception):
         self.message = message
 
 
+class Range:
+    """
+    A Nagios threshold range: N, N:, ~:N, M:N or @M:N.
+
+    See https://www.monitoring-plugins.org/doc/guidelines.html#THRESHOLDFORMAT
+    """
+
+    def __init__(self, start=0, end=INF, inside=False):
+        if not start <= end:  # also rejects NaN
+            raise CheckError(STATE_UNKNOWN,
+                             f"invalid threshold range {_number(start)}:{_number(end)}, start is above end")
+        self.start = start
+        self.end = end
+        self.inside = inside
+
+    @classmethod
+    def parse(cls, spec):
+        text = spec[1:] if spec.startswith('@') else spec
+        start_text, colon, end_text = text.rpartition(':')
+        try:
+            start = -INF if start_text == '~' else float(start_text or 0)
+            end = float(end_text) if end_text or not colon else INF
+        except ValueError:
+            raise CheckError(STATE_UNKNOWN, f"invalid threshold range '{spec}'") from None
+        # Infinity is spelled "~" or an empty end, and ages are never negative,
+        # so anything else would alert on every run or never
+        explicit = [value for value, given in ((start, start_text), (end, end_text)) if given and given != '~']
+        if not all(math.isfinite(value) for value in explicit) or end < 0:
+            raise CheckError(STATE_UNKNOWN, f"invalid threshold range '{spec}'")
+        return cls(start, end, inside=spec.startswith('@'))
+
+    def alerts(self, value):
+        """Whether value is outside the range (inside, for @M:N)."""
+        outside = value < self.start or value > self.end
+        return outside != self.inside
+
+    def __str__(self):
+        start = '~' if self.start == -INF else _number(self.start)
+        if self.end == INF:
+            text = f"{start}:"
+        elif self.start == 0:
+            text = _number(self.end)
+        else:
+            text = f"{start}:{_number(self.end)}"
+        return ('@' if self.inside else '') + text
+
+
+def _number(value):
+    """Format a threshold number without a needless '.0'."""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
 class PluginArgumentParser(argparse.ArgumentParser):
     """Reports usage errors as UNKNOWN; argparse's exit code 2 means CRITICAL to Nagios."""
 
@@ -73,23 +132,32 @@ def parse_args():
         description='Check OpenSearch index activity',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Thresholds:
+  -w and -c take Nagios threshold ranges, applied to the age in seconds of the
+  oldest of the --count newest documents.  If fewer documents are found, the
+  age counts as infinite.
+    N       alert if the age is above N (too little activity)
+    N:      alert if the age is below N (too much activity, unwanted documents)
+    M:N     alert if the age is below M or above N
+    ~:N     same as N
+    @M:N    alert if the age is between M and N
+  Without any threshold option, -w 3600 -c 7200 is used.
+
 Examples:
-  # Normal mode: Alert if index has NO recent activity
   %(prog)s -i logs-2024 -w 3600 -c 7200
-    Check 'logs-2024' index, warn if no activity for 1h, critical at 2h
+    Warn if 'logs-2024' has had no activity for 1h, critical at 2h
 
   %(prog)s -i filebeat-* -w 300 -c 600 -t @timestamp
     Check 'filebeat-*' index with custom timestamp field
 
-  %(prog)s -i myindex -w 1800 -c 3600 -H https://opensearch.local:9200
-    Check with custom OpenSearch URL
+  %(prog)s -i my-logs-* --count 100 -w 30:180 -c 10:600
+    Alert if 100 documents arrive in less than 30s/10s or take more than 3m/10m
 
-  # Reverse mode: Alert if critical messages ARE found
-  %(prog)s -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' --min-critical 300 --reverse
-    Alert CRITICAL if ERROR level logs found in last 5 minutes
+  %(prog)s -i logs-* --filter '{"term": {"level.keyword": "ERROR"}}' -c 300:
+    Alert CRITICAL if ERROR level logs were found in the last 5 minutes
 
-  %(prog)s -i app-* --filter '{"query_string": {"query": "FATAL OR CRITICAL"}}' --min-warning 600 --reverse
-    Alert WARNING if FATAL/CRITICAL messages found in last 10 minutes
+  %(prog)s -i haproxy-* --filter '{"range": {"http_code": {"gte": 500}}}' --count 100 -w 1800: -c 300:
+    WARNING if 100 HTTP 5xx errors were logged within 30 minutes, CRITICAL within 5
         """
     )
 
@@ -101,32 +169,29 @@ Examples:
 
     parser.add_argument(
         '-w', '--warning',
-        type=int,
-        default=3600,
-        help='Maximum age warning threshold in seconds (default: 3600 = 1 hour). '
-             'Alert if documents are OLDER than this.'
+        metavar='RANGE',
+        help='Warning threshold for the age in seconds, as a Nagios range (see below). '
+             'N alerts on ages above N, N: on ages below N.'
     )
 
     parser.add_argument(
         '-c', '--critical',
-        type=int,
-        default=7200,
-        help='Maximum age critical threshold in seconds (default: 7200 = 2 hours). '
-             'Alert if documents are OLDER than this.'
+        metavar='RANGE',
+        help='Critical threshold for the age in seconds, as a Nagios range (see below).'
     )
 
     parser.add_argument(
         '--min-warning',
         type=int,
-        help='Minimum age warning threshold in seconds. '
-             'Alert if documents are NEWER than this (excessive activity).'
+        metavar='SECONDS',
+        help='Lower bound of the warning range: --min-warning 30 -w 180 is the same as -w 30:180.'
     )
 
     parser.add_argument(
         '--min-critical',
         type=int,
-        help='Minimum age critical threshold in seconds. '
-             'Alert if documents are NEWER than this (excessive activity).'
+        metavar='SECONDS',
+        help='Lower bound of the critical range.'
     )
 
     parser.add_argument(
@@ -185,51 +250,50 @@ Examples:
         help='Path to .netrc file for credentials (default: ~/.netrc, then /etc/nagios/netrc)'
     )
 
-    parser.add_argument(
-        '--reverse',
-        action='store_true',
-        help='Reverse logic: OK when no documents found, CRITICAL when documents found. '
-             'Ignores max age (--warning, --critical). Requires --min-warning and/or --min-critical. '
-             'Use with --filter to alert on presence of critical log messages.'
-    )
-
     return parser.parse_args()
+
+
+def threshold_range(spec, min_age, name):
+    """The Range for -w/-c, with --min-warning/--min-critical as its lower bound."""
+    if min_age is not None and min_age < 0:
+        raise CheckError(STATE_UNKNOWN, f"--min-{name} must be >= 0")
+    if spec is None:
+        return None if min_age is None else Range(min_age)
+    threshold = Range.parse(spec)
+    if min_age is None:
+        return threshold
+    if threshold.inside or threshold.start != 0:
+        raise CheckError(STATE_UNKNOWN, f"--min-{name} conflicts with the lower bound of --{name} {spec}")
+    return Range(min_age, threshold.end)
+
+
+def get_thresholds(args):
+    """
+    The (warning, critical) Ranges, None for a threshold that is not set.
+
+    Raises CheckError(UNKNOWN) for combinations that can never return OK or WARNING.
+    """
+    if all(v is None for v in (args.warning, args.critical, args.min_warning, args.min_critical)):
+        return Range(end=DEFAULT_WARNING), Range(end=DEFAULT_CRITICAL)
+
+    warning = threshold_range(args.warning, args.min_warning, 'warning')
+    critical = threshold_range(args.critical, args.min_critical, 'critical')
+
+    if warning is not None and critical is not None and not (warning.inside or critical.inside):
+        # Ages are never negative
+        w_start, c_start = max(warning.start, 0), max(critical.start, 0)
+        if max(w_start, c_start) > min(warning.end, critical.end):
+            raise CheckError(STATE_UNKNOWN,
+                             f"warning range {warning} and critical range {critical} leave no OK range")
+        if w_start <= c_start and critical.end <= warning.end and (w_start, warning.end) != (c_start, critical.end):
+            raise CheckError(STATE_UNKNOWN,
+                             f"critical range {critical} lies within warning range {warning}, "
+                             "so WARNING can never be returned")
+    return warning, critical
 
 
 def validate_args(args):
     """Raise CheckError(UNKNOWN) on invalid argument combinations."""
-    thresholds = {
-        '--warning': args.warning,
-        '--critical': args.critical,
-        '--min-warning': args.min_warning,
-        '--min-critical': args.min_critical,
-    }
-    for name, value in thresholds.items():
-        if value is not None and value < 0:
-            raise CheckError(STATE_UNKNOWN, f"{name} must be >= 0")
-
-    if args.min_warning is not None and args.min_critical is not None:
-        if args.min_critical > args.min_warning:
-            raise CheckError(STATE_UNKNOWN, "--min-critical must be <= --min-warning")
-
-    # In reverse mode, max age thresholds are ignored
-    if not args.reverse:
-        if args.critical < args.warning:
-            raise CheckError(STATE_UNKNOWN, "--critical must be >= --warning")
-
-        # Ages below a min threshold alert, ages from --warning up alert:
-        # the OK range is [max(min thresholds), --warning)
-        lowest_ok_age = max(
-            (v for v in (args.min_warning, args.min_critical) if v is not None),
-            default=0,
-        )
-        if lowest_ok_age >= args.warning:
-            raise CheckError(STATE_UNKNOWN, "thresholds leave no OK range "
-                             "(need --min-warning and --min-critical < --warning <= --critical)")
-    elif args.min_warning is None and args.min_critical is None:
-        # In reverse mode, only min-age thresholds make sense and at least one is required
-        raise CheckError(STATE_UNKNOWN, "--reverse mode requires --min-warning and/or --min-critical")
-
     if args.count < 1:
         raise CheckError(STATE_UNKNOWN, "--count must be >= 1")
 
@@ -387,12 +451,12 @@ def document_age(hit, now):
     Age in whole seconds of a search hit, or None if it lacks the timestamp field.
 
     OpenSearch returns the sort value of a date field as epoch millis, whatever
-    the field's format or nesting.
+    the field's format or nesting.  Future timestamps (clock skew) count as 0.
     """
     value = (hit.get('sort') or [None])[0]
     if not isinstance(value, (int, float)) or value == MISSING_SORT_VALUE:
         return None
-    return int(now - value / 1000)
+    return max(0, int(now - value / 1000))
 
 
 def format_duration(seconds):
@@ -411,35 +475,31 @@ def format_duration(seconds):
         return f"{days}d {hours}h"
 
 
-def perfdata(args, newest_age, oldest_age, found):
+def perfdata(newest_age, oldest_age, count, warning, critical):
     """
     Nagios performance data for the check result.
 
     Thresholds are attached to the value they are checked against: the oldest
-    of the --count newest documents.  A min threshold becomes the lower bound
-    of a Nagios range ("min:max", or "min:" in reverse mode).
+    of the --count newest documents.
     """
-    def threshold(min_age, max_age):
-        if min_age is None:
-            return "" if max_age is None else f"{max_age}"
-        return f"{min_age}:" if max_age is None else f"{min_age}:{max_age}"
-
-    if args.reverse:
-        checked = f"{threshold(args.min_warning, None)};{threshold(args.min_critical, None)};0;"
-    else:
-        checked = (f"{threshold(args.min_warning, args.warning)};"
-                   f"{threshold(args.min_critical, args.critical)};0;")
-
-    if args.count == 1:
+    checked = f"{warning or ''};{critical or ''};0;"
+    if count == 1:
         return f"age={oldest_age}s;{checked}"
-    if args.reverse:
-        return f"age={oldest_age}s;{checked} count={found};;;0;"
     return f"age={newest_age}s;;;0; oldest_age={oldest_age}s;{checked}"
+
+
+def evaluate(age, warning, critical):
+    """(state, the Range that alerted or None) for an age; CRITICAL takes precedence."""
+    for state, threshold in ((STATE_CRITICAL, critical), (STATE_WARNING, warning)):
+        if threshold is not None and threshold.alerts(age):
+            return state, threshold
+    return STATE_OK, None
 
 
 def check(args):
     """Run the check; return (state, message)."""
     validate_args(args)
+    warning, critical = get_thresholds(args)
     filter_query = parse_filter(args.filter)
 
     username, password, netrc_path = get_credentials(args.host, args.netrc)
@@ -451,6 +511,7 @@ def check(args):
         else:
             print("DEBUG: No credentials found in any netrc file", file=sys.stderr)
         print(f"DEBUG: Querying {args.host}/{args.index}", file=sys.stderr)
+        print(f"DEBUG: Warning range: {warning}, critical range: {critical}", file=sys.stderr)
         if args.count > 1:
             print(f"DEBUG: Fetching {args.count} documents, all must be within thresholds", file=sys.stderr)
         if filter_query:
@@ -471,16 +532,12 @@ def check(args):
 
     filter_msg = " matching filter" if filter_query else ""
 
-    # In reverse mode, no or too few documents is OK (no critical messages found)
-    if not documents:
-        if args.reverse:
-            return STATE_OK, f"No documents found{filter_msg} in index '{args.index}'"
-        return STATE_CRITICAL, f"No documents found in index '{args.index}'"
-
+    # Fewer documents than --count: the Nth newest is infinitely old
     if len(documents) < args.count:
-        if args.reverse:
-            return STATE_OK, f"Only {len(documents)} document(s) found{filter_msg} (requested {args.count})"
-        return STATE_CRITICAL, f"Only {len(documents)} documents found, need {args.count}"
+        state = evaluate(INF, warning, critical)[0]
+        if not documents:
+            return state, f"No documents found{filter_msg} in index '{args.index}'"
+        return state, f"Only {len(documents)} document(s) found{filter_msg}, fewer than --count {args.count}"
 
     now = datetime.now(timezone.utc).timestamp()
     ages = [document_age(hit, now) for hit in documents]
@@ -501,39 +558,26 @@ def check(args):
         print(f"DEBUG: Oldest document age: {oldest_age}s", file=sys.stderr)
         print(f"DEBUG: Checked {len(documents)} documents", file=sys.stderr)
 
-    perf = perfdata(args, newest_age, oldest_age, len(documents))
+    perf = perfdata(newest_age, oldest_age, args.count, warning, critical)
     newest_formatted = format_duration(newest_age)
     oldest_formatted = format_duration(oldest_age)
+    state, violated = evaluate(oldest_age, warning, critical)
 
-    # REVERSE MODE: Documents found is bad (critical messages detected)
-    # Only check minimum age thresholds - the oldest of the --count newest
-    # documents must be newer than a threshold to trigger an alert
-    if args.reverse:
-        found = f"Found {len(documents)} document(s){filter_msg}"
-        for state, min_age in ((STATE_CRITICAL, args.min_critical), (STATE_WARNING, args.min_warning)):
-            if min_age is not None and oldest_age < min_age:
-                return state, (f"{found}, oldest is {oldest_formatted} old "
-                               f"(< {format_duration(min_age)}) | {perf}")
-        # Documents found but older than thresholds - OK (old critical messages are fine)
-        return STATE_OK, f"{found}, but oldest is {oldest_formatted} old (older than thresholds) | {perf}"
+    if violated is None:
+        if args.count > 1:
+            return STATE_OK, (f"{args.count} documents{filter_msg}, newest: {newest_formatted}, "
+                              f"oldest: {oldest_formatted} | {perf}")
+        return STATE_OK, f"Index '{args.index}' has activity{filter_msg} from {newest_formatted} ago | {perf}"
 
-    # NORMAL MODE: too much activity (min age) or too little (max age);
-    # CRITICAL takes precedence
-    oldest_of = f"oldest of {args.count} documents is"
-    for state, min_age, max_age in (
-        (STATE_CRITICAL, args.min_critical, args.critical),
-        (STATE_WARNING, args.min_warning, args.warning),
-    ):
-        if min_age is not None and oldest_age < min_age:
-            return state, (f"Excessive activity - {oldest_of} only {oldest_formatted} old "
-                           f"(minimum threshold: {format_duration(min_age)}) | {perf}")
-        if oldest_age >= max_age:
-            return state, (f"Insufficient activity - {oldest_of} {oldest_formatted} old "
-                           f"(maximum threshold: {format_duration(max_age)}) | {perf}")
-
-    if args.count > 1:
-        return STATE_OK, f"{args.count} documents, newest: {newest_formatted}, oldest: {oldest_formatted} | {perf}"
-    return STATE_OK, f"Index '{args.index}' has activity from {newest_formatted} ago | {perf}"
+    what = "newest document" if args.count == 1 else f"oldest of the {args.count} newest documents"
+    what += filter_msg
+    if violated.inside:
+        return state, f"{what} is {oldest_formatted} old (alert range: {violated}) | {perf}"
+    if oldest_age < violated.start:
+        return state, (f"Excessive activity - {what} is only {oldest_formatted} old "
+                       f"(minimum threshold: {format_duration(int(violated.start))}) | {perf}")
+    return state, (f"Insufficient activity - {what} is {oldest_formatted} old "
+                   f"(maximum threshold: {format_duration(int(violated.end))}) | {perf}")
 
 
 def main():

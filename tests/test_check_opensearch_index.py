@@ -9,7 +9,7 @@ import pytest
 import check_opensearch_index as plugin
 
 OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
-
+INF = float("inf")
 
 LONG_MIN = -(2**63)  # sort value OpenSearch gives a document lacking the field
 
@@ -48,14 +48,82 @@ def run(monkeypatch, capsys, argv, ages=(), hits=None, requests=None, response=i
 
 
 @pytest.mark.parametrize(
+    "spec, start, end, inside",
+    [
+        ("10", 0, 10, False),
+        ("10:", 10, INF, False),
+        ("~:10", -INF, 10, False),
+        ("10:20", 10, 20, False),
+        ("@10:20", 10, 20, True),
+        ("1.5", 0, 1.5, False),
+    ],
+)
+def test_range_parse(spec, start, end, inside):
+    threshold = plugin.Range.parse(spec)
+    assert (threshold.start, threshold.end, threshold.inside) == (start, end, inside)
+    assert str(threshold) == spec
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "abc", "10:5", "-5", "", "@", "1:2:3", "nan",
+        # ages are never negative: these would alert on every run
+        "~:-5", "-10:-5", "@~:-5",
+        # infinity is only spelled "~" or an empty end
+        "inf", "1e400", "infinity:", "-inf:10",
+    ],
+)
+def test_range_parse_invalid(spec):
+    with pytest.raises(plugin.CheckError) as exc:
+        plugin.Range.parse(spec)
+    assert exc.value.state == UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "spec, value, alerts",
+    [
+        ("10", 5, False),
+        ("10", 10, False),
+        ("10", 11, True),
+        ("10", INF, True),
+        ("10:", 9, True),
+        ("10:", 10, False),
+        ("10:", INF, False),
+        ("~:10", 0, False),
+        ("~:10", 11, True),
+        ("10:20", 9, True),
+        ("10:20", 15, False),
+        ("10:20", 21, True),
+        ("@10:20", 9, False),
+        ("@10:20", 10, True),
+        ("@10:20", 20, True),
+        ("@10:20", 21, False),
+    ],
+)
+def test_range_alerts(spec, value, alerts):
+    assert plugin.Range.parse(spec).alerts(value) is alerts
+
+
+@pytest.mark.parametrize(
     "argv, ages, expected",
     [
+        # defaults: -w 3600 -c 7200
+        ([], [10], OK),
+        ([], [5000], WARNING),
+        ([], [10000], CRITICAL),
         # max age only
         (["-w", "100", "-c", "1000"], [10], OK),
         (["-w", "100", "-c", "1000"], [500], WARNING),
         (["-w", "100", "-c", "1000"], [5000], CRITICAL),
         (["-w", "100", "-c", "1000"], [], CRITICAL),
-        # min and max age
+        # giving one threshold disables the defaults of the others
+        (["-w", "100"], [5000], WARNING),
+        (["-c", "1000"], [500], OK),
+        # min and max age, as ranges and with --min-*
+        (["-w", "50:100", "-c", "20:1000"], [10], CRITICAL),
+        (["-w", "50:100", "-c", "20:1000"], [30], WARNING),
+        (["-w", "50:100", "-c", "20:1000"], [70], OK),
         (["-w", "100", "-c", "1000", "--min-warning", "50", "--min-critical", "20"], [10], CRITICAL),
         (["-w", "100", "-c", "1000", "--min-warning", "50", "--min-critical", "20"], [30], WARNING),
         (["-w", "100", "-c", "1000", "--min-warning", "50", "--min-critical", "20"], [70], OK),
@@ -63,10 +131,15 @@ def run(monkeypatch, capsys, argv, ages=(), hits=None, requests=None, response=i
         (["-w", "100", "-c", "1000", "--count", "3"], [1, 2, 500], WARNING),
         (["-w", "100", "-c", "1000", "--count", "3"], [1, 2, 50], OK),
         (["-w", "100", "-c", "1000", "--count", "3"], [1, 2], CRITICAL),
-        (["-w", "100", "-c", "1000", "--count", "3", "--min-critical", "20"], [1, 2, 10], CRITICAL),
+        (["-w", "100", "-c", "20:1000", "--count", "3"], [1, 2, 10], CRITICAL),
+        # future timestamps (clock skew) count as age 0
+        (["-w", "100", "-c", "1000"], [-5], OK),
+        # alert inside a range
+        (["-c", "@10:20"], [15], CRITICAL),
+        (["-c", "@10:20"], [30], OK),
     ],
 )
-def test_normal_mode_thresholds(monkeypatch, capsys, argv, ages, expected):
+def test_thresholds(monkeypatch, capsys, argv, ages, expected):
     code, out = run(monkeypatch, capsys, argv, ages)
     assert code == expected, out
 
@@ -74,39 +147,67 @@ def test_normal_mode_thresholds(monkeypatch, capsys, argv, ages, expected):
 @pytest.mark.parametrize(
     "argv, ages, expected",
     [
-        (["--min-critical", "60"], [], OK),
-        (["--min-critical", "60"], [5], CRITICAL),
-        (["--min-critical", "60"], [500], OK),
-        (["--min-critical", "60", "--count", "3"], [1, 2, 3], CRITICAL),
+        (["-c", "60:"], [], OK),
+        (["-c", "60:"], [5], CRITICAL),
+        (["-c", "60:"], [500], OK),
+        (["-c", "60:", "--count", "3"], [1, 2, 3], CRITICAL),
         # a single new document must not trigger when --count asks for N
-        (["--min-critical", "60", "--count", "3"], [1, 500, 600], OK),
-        (["--min-critical", "60", "--count", "3"], [1, 2], OK),
+        (["-c", "60:", "--count", "3"], [1, 500, 600], OK),
+        (["-c", "60:", "--count", "3"], [1, 2], OK),
+        (["-c", "60:", "-w", "600:", "--count", "2"], [1, 300], WARNING),
+        (["-c", "60:", "-w", "600:", "--count", "2"], [1, 30], CRITICAL),
+        # the same with the older --min-* options
         (["--min-critical", "60", "--min-warning", "600", "--count", "2"], [1, 300], WARNING),
-        (["--min-critical", "60", "--min-warning", "600", "--count", "2"], [1, 30], CRITICAL),
+        (["--min-critical", "60", "--min-warning", "600"], [], OK),
     ],
 )
-def test_reverse_mode_thresholds(monkeypatch, capsys, argv, ages, expected):
-    code, out = run(monkeypatch, capsys, ["--reverse", *argv], ages)
+def test_unwanted_documents(monkeypatch, capsys, argv, ages, expected):
+    code, out = run(monkeypatch, capsys, argv, ages)
     assert code == expected, out
+
+
+FILTER = ["--filter", '{"term": {"http_code": 500}}']
+
+
+@pytest.mark.parametrize(
+    "argv, ages, expected",
+    [
+        (["-c", "300:", "--count", "2", *FILTER], [1, 5],
+         "CRITICAL: Excessive activity - oldest of the 2 newest documents matching filter is only 5s old "
+         "(minimum threshold: 5m 0s) | "),
+        (["-c", "300:", *FILTER], [], "OK: No documents found matching filter in index 'idx'"),
+        (["-c", "300:", "--count", "2", *FILTER], [1],
+         "OK: Only 1 document(s) found matching filter, fewer than --count 2"),
+        (["-w", "100"], [500],
+         "WARNING: Insufficient activity - newest document is 8m 20s old (maximum threshold: 1m 40s) | "),
+        (["-c", "@10:20"], [15], "CRITICAL: newest document is 15s old (alert range: @10:20) | "),
+    ],
+)
+def test_messages(monkeypatch, capsys, argv, ages, expected):
+    code, out = run(monkeypatch, capsys, argv, ages)
+    assert out.startswith(expected), out
 
 
 @pytest.mark.parametrize(
     "argv",
     [
+        # WARNING could never be returned
         ["-w", "600", "-c", "60"],
-        ["-w", "-5", "-c", "600"],
-        ["-w", "60", "-c", "600", "--min-warning", "60"],
-        # every age < 100 is CRITICAL, every age >= 100 is WARNING: never OK
+        ["--min-critical", "100", "--min-warning", "50"],
+        # every age < 100 is CRITICAL, every age > 60 is WARNING: never OK
         ["-w", "60", "-c", "600", "--min-critical", "100"],
-        ["-w", "600", "-c", "1200", "--min-critical", "100", "--min-warning", "50"],
+        ["-w", "-5", "-c", "600"],
+        ["-w", "10:5"],
+        ["-w", "60", "-c", "600", "--min-warning", "61"],
         ["-w", "600", "-c", "1200", "--min-warning", "-1"],
+        ["--min-critical", "-1"],
+        # two lower bounds
+        ["-w", "1800:", "--min-warning", "60"],
         ["--count", "0"],
-        ["--reverse"],
-        ["--reverse", "--min-critical", "-1"],
-        ["--reverse", "--min-critical", "100", "--min-warning", "50"],
         ["--filter", "{not json"],
         ["-k", "--ca-file", "ca.pem"],
-        # argparse errors must not exit 2, which Nagios reads as CRITICAL
+        # removed option; argparse errors must not exit 2, which Nagios reads as CRITICAL
+        ["--reverse", "--min-critical", "60"],
         ["--no-such-option"],
         ["-w", "abc"],
     ],
@@ -157,18 +258,25 @@ def test_valid_min_critical_below_warning(monkeypatch, capsys):
 @pytest.mark.parametrize(
     "argv, ages, expected",
     [
+        ([], [30], "age=30s;3600;7200;0;"),
         (["-w", "100", "-c", "1000"], [10], "age=10s;100;1000;0;"),
         # thresholds go on the series they are applied to
         (["-w", "100", "-c", "1000", "--count", "3"], [1, 2, 50], "age=1s;;;0; oldest_age=50s;100;1000;0;"),
         (["-w", "100", "-c", "1000", "--min-warning", "50", "--min-critical", "20"], [70],
          "age=70s;50:100;20:1000;0;"),
-        (["--reverse", "--min-critical", "60", "--min-warning", "600"], [5], "age=5s;600:;60:;0;"),
-        (["--reverse", "--min-critical", "60", "--count", "2"], [5, 6], "age=6s;;60:;0; count=2;;;0;"),
+        (["-w", "600:", "-c", "60:"], [5], "age=5s;600:;60:;0;"),
+        (["--min-critical", "60", "--count", "2"], [5, 6], "age=5s;;;0; oldest_age=6s;;60:;0;"),
+        (["-c", "~:100"], [30], "age=30s;;~:100;0;"),
+        # no age, no perfdata
+        (["-c", "60:"], [], None),
     ],
 )
 def test_perfdata(monkeypatch, capsys, argv, ages, expected):
     code, out = run(monkeypatch, capsys, argv, ages)
-    assert out.rstrip("\n").split(" | ", 1)[1] == expected
+    if expected is None:
+        assert " | " not in out
+    else:
+        assert out.rstrip("\n").split(" | ", 1)[1] == expected
 
 
 def test_url_is_quoted_and_trailing_slash_dropped(monkeypatch, capsys):
