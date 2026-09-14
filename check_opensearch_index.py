@@ -58,9 +58,18 @@ class CheckError(Exception):
         self.message = message
 
 
+class PluginArgumentParser(argparse.ArgumentParser):
+    """Reports usage errors as UNKNOWN; argparse's exit code 2 means CRITICAL to Nagios."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"UNKNOWN: {message}")
+        sys.exit(STATE_UNKNOWN)
+
+
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
+    parser = PluginArgumentParser(
         description='Check OpenSearch index activity',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

@@ -63,6 +63,7 @@ Quite much of the changelog was AI-generated
 - A trailing slash on `-H` and special characters in `-i` (date math) no longer break the URL
 - A timeout while reading the response gives CRITICAL, like a connect timeout
 - An unreadable netrc file gives a clear UNKNOWN message
+- Invalid command line arguments give UNKNOWN instead of exit code 2, which Nagios reads as CRITICAL
 
 ## [0.3.0] - [2025-11-20]
 

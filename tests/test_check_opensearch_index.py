@@ -106,6 +106,9 @@ def test_reverse_mode_thresholds(monkeypatch, capsys, argv, ages, expected):
         ["--reverse", "--min-critical", "100", "--min-warning", "50"],
         ["--filter", "{not json"],
         ["-k", "--ca-file", "ca.pem"],
+        # argparse errors must not exit 2, which Nagios reads as CRITICAL
+        ["--no-such-option"],
+        ["-w", "abc"],
     ],
 )
 def test_invalid_arguments(monkeypatch, capsys, argv):
