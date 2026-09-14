@@ -29,7 +29,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-__version__ = "0.4.0.dev0"
+__version__ = "0.4.0"
 
 SYSTEM_NETRC = '/etc/nagios/netrc'
 

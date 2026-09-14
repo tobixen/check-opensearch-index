@@ -10,30 +10,25 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 Quite much of the changelog was AI-generated
 
-## [0.4.0] - [unreleased]
+## [0.4.0] - [2026-09-14]
 
 ### Added
 
 - Thresholds (`-w`/`-c`) accept the Nagios range format, e.g. `-c 300:` to alert when a document
   newer than 5 minutes is found.  Combined with `--filter`, this alerts on the presence of errors,
-  security events and other unwanted documents.  `--min-warning`/`--min-critical` still work
-
+  security events and other unwanted documents; see `FILTERS.md` for examples.
+  `--min-warning`/`--min-critical` still work
 - `--ca-file` to verify the server certificate against a private CA instead of using `-k`
 - `-V`/`--version`
-
-- Secondary default netrc location: `/etc/nagios/netrc`
-  - Script now automatically tries `~/.netrc` first, then `/etc/nagios/netrc` as fallback
-  - No need to specify `--netrc` parameter when using `/etc/nagios/netrc`
-  - Improves NRPE/Nagios deployment experience where users lack proper home directories
+- Without `--netrc`, `/etc/nagios/netrc` is tried after `~/.netrc`, so NRPE users without a
+  proper home directory need no extra option
 
 ### Changed
 
 - **BREAKING**: when any threshold option is given, the others no longer default to 3600/7200.
   `-w 300` alone used to imply `-c 7200`
+- **BREAKING**: Elasticsearch has to be 7.2 or newer; any OpenSearch version works
 - An age exactly at a maximum threshold is now OK, as the Nagios range format defines it
-- Updated help text and README with threshold range examples
-  - Simplified credentials setup documentation
-  - Consolidated overlapping content between Usage and Examples sections (31% reduction in length)
 
 ### Removed
 
@@ -44,12 +39,11 @@ Quite much of the changelog was AI-generated
 
 - Threshold validation now rejects negative values and combinations that can never return OK
   (e.g. `-w 60 -c 600 --min-critical 100`)
-- Timestamps are read from the sort value instead of being parsed from the document, which fixes
-  dotted field names (`-t event.created`), epoch-millis values, timestamps without a timezone
-  and `date_nanos` fields.  Elasticsearch has to be 7.2 or newer; any OpenSearch version works
+- Timestamps with dotted field names (`-t event.created`), epoch-millis values, no timezone, or
+  of type `date_nanos` are now handled
 - Index patterns where some indices lack the timestamp field no longer fail with HTTP 400
-- Performance data attaches thresholds to the value they are checked against (`oldest_age` when
-  `--count` > 1), includes the `--min-*` thresholds as Nagios ranges
+- Performance data puts the thresholds on the value they are checked against (`oldest_age` when
+  `--count` > 1) and includes the `--min-*` thresholds
 - A trailing slash on `-H` and special characters in `-i` (date math) no longer break the URL
 - A timeout while reading the response gives CRITICAL, like a connect timeout
 - An unreadable netrc file gives a clear UNKNOWN message
