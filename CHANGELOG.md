@@ -10,7 +10,7 @@ This project should adhere to [Semantic Versioning](https://semver.org/spec/v2.0
 
 Quite much of the changelog was AI-generated
 
-## [0.4.0] - [2026-09-14]
+## [0.4.0] - [2026-09-19]
 
 ### Added
 
@@ -29,6 +29,7 @@ Quite much of the changelog was AI-generated
   `-w 300` alone used to imply `-c 7200`
 - **BREAKING**: Elasticsearch has to be 7.2 or newer; any OpenSearch version works
 - An age exactly at a maximum threshold is now OK, as the Nagios range format defines it
+- **BREAKING** but only if you're subscribing to main: `--reverse` was added and removed between 0.3.0 and 0.4.0.
 
 ### Removed
 
